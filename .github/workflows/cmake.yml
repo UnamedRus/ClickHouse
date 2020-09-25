@@ -37,7 +37,7 @@ jobs:
 
     - name: Debug
       working-directory: ${{runner.workspace}}/build
-      run: ls -alh ../Clickhouse
+      run: ls -alh ../*
       
     - name: Build
       working-directory: ${{runner.workspace}}/build
