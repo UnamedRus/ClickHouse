@@ -34,22 +34,23 @@ jobs:
         # Override default platform with one of [win, mac, linux]
         platform: linux
         # Destination directory, will be added to PATH
+
     - name: Debug
       working-directory: ${{runner.workspace}}/build
-      run: ls && pwd
+      run: ls -alh ..
       
     - name: Build
       working-directory: ${{runner.workspace}}/build
       shell: bash
       # Execute the build.  You can specify a specific target with "--target <NAME>"
-      run: cd build && cmake .. 
+      run: cmake .. 
 
     - name: Ninja
       working-directory: ${{runner.workspace}}/build
       shell: bash
       # Execute tests defined by the CMake configuration.  
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
-      run: cd build && ninja clickhouse
+      run: ninja clickhouse
 
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v2.1.4
