@@ -38,12 +38,16 @@ jobs:
     - name: Debug
       working-directory: ${{runner.workspace}}/build
       run: ls -alh ../*
-      
+    
+    - name: Debug2
+      working-directory: ${{runner.workspace}}/build
+      run: ls -alh ../Clickhouse/
+    
     - name: Build
       working-directory: ${{runner.workspace}}/build
       shell: bash
       # Execute the build.  You can specify a specific target with "--target <NAME>"
-      run: cmake ../Clickhouse 
+      run: cmake ../Clickhouse/
 
     - name: Ninja
       working-directory: ${{runner.workspace}}/build
