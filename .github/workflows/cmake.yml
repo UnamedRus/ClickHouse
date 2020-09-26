@@ -42,11 +42,11 @@ jobs:
 
     - name: Debug
       working-directory: ${{runner.workspace}}/build
-      run: ls -alh ../*
+      run: df -h /
     
     - name: Debug2
       working-directory: ${{runner.workspace}}/build
-      run: ls -alh ../ClickHouse/
+      run: lsblk
     
     - name: Build
       working-directory: ${{runner.workspace}}/build
