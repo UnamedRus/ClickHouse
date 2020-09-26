@@ -40,6 +40,25 @@ jobs:
         platform: linux
         # Destination directory, will be added to PATH
 
+    - name: Maximize build disk space
+      # You may pin to the exact commit or the version.
+      # uses: easimon/maximize-build-space@ad3a54f8b164ae1b4e13a7e20e5a575e2ec1247f
+      uses: easimon/maximize-build-space@v1
+      with:
+        # Space to be left free on the root filesystem, in Megabytes.
+        root-reserve-mb: 512 # optional, default is 1024
+        # Swap space to create, in Megabytes.
+        swap-size-mb: 4096 # optional, default is 4096
+        # Absolute path to the mount point where the build space will be available, defaults to $GITHUB_WORKSPACE if unset.
+        # Absolute file path for the LVM image created on the root filesystem, the default is usually fine.
+        pv-loop-path: /pv.img # optional, default is /pv.img
+        # Removes .NET runtime and libraries. (frees ~17 GB)
+        remove-dotnet: true # optional, default is false
+        # Removes Android SDKs and Tools. (frees ~11 GB)
+        remove-android: true # optional, default is false
+        # Removes GHC (Haskell) artifacts. (frees ~2.7 GB)
+        remove-haskell: true # optional, default is false
+
     - name: Debug
       working-directory: ${{runner.workspace}}/build
       run: df -h /
