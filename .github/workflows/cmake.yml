@@ -35,8 +35,10 @@ jobs:
         remove-android: true # optional, default is false
         # Removes GHC (Haskell) artifacts. (frees ~2.7 GB)
         remove-haskell: true # optional, default is false
-    - uses: actions/checkout@v2
+    - name: Chmod
+      run: sudo chmod -R 777 ${{runner.workspace}}
 
+    - uses: actions/checkout@v2
     - name: Submodules-init
       # You may pin to the exact commit or the version.
       # uses: snickerbockers/submodules-init@74927a8bb0fe1bb0f1f1e4d102384a8e69f19171
