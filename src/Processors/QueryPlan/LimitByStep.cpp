@@ -1,8 +1,12 @@
 #include <Processors/QueryPlan/LimitByStep.h>
 #include <Processors/Transforms/LimitByTransform.h>
+#include <Processors/IProcessor.h>
+#include <Processors/ResizeProcessor.h>
+#include <Processors/Transforms/ScatterByPartitionTransform.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <IO/Operators.h>
 #include <Common/JSONBuilder.h>
+
 
 namespace DB
 {
@@ -32,10 +36,62 @@ LimitByStep::LimitByStep(
 {
 }
 
+void LimitByStep::scatterByPartitionIfNeeded(QueryPipelineBuilder& pipeline)
+{
+    size_t threads = pipeline.getNumThreads();
+    size_t streams = pipeline.getNumStreams();
+    if (threads > 1)
+    {
+        Block stream_header = pipeline.getHeader();
+
+        ColumnNumbers key_columns;
+        key_columns.reserve(columns.size());
+        for (auto & column_name : columns)
+        {
+            key_columns.push_back(stream_header.getPositionByName(column_name));
+        }
+
+        pipeline.transform([&](OutputPortRawPtrs ports)
+        {
+            Processors processors;
+            for (auto * port : ports)
+            {
+                auto scatter = std::make_shared<ScatterByPartitionTransform>(stream_header, threads, key_columns);
+                connect(*port, scatter->getInputs().front());
+                processors.push_back(scatter);
+            }
+            return processors;
+        });
+
+        if (streams > 1)
+        {
+            pipeline.transform([&](OutputPortRawPtrs ports)
+            {
+                Processors processors;
+                for (size_t i = 0; i < threads; ++i)
+                {
+                    size_t output_it = i;
+                    auto resize = std::make_shared<ResizeProcessor>(stream_header, streams, 1);
+                    auto & inputs = resize->getInputs();
+
+                    for (auto input_it = inputs.begin(); input_it != inputs.end(); output_it += threads, ++input_it)
+                        connect(*ports[output_it], *input_it);
+                    processors.push_back(resize);
+                }
+                return processors;
+            });
+        }
+    }
+    else
+    {
+        pipeline.resize(1);
+    }
+}
 
 void LimitByStep::transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &)
 {
-    pipeline.resize(1);
+
+    scatterByPartitionIfNeeded(pipeline);
 
     pipeline.addSimpleTransform([&](const Block & header, QueryPipelineBuilder::StreamType stream_type) -> ProcessorPtr
     {
