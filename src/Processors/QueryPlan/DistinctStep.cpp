@@ -8,6 +8,14 @@
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <IO/Operators.h>
 #include <Common/JSONBuilder.h>
+#include "DataTypes/DataTypesNumber.h"
+#include "Processors/AccumulatingTransform.h"
+#include "Processors/ConcatProcessor.h"
+#include "Processors/ForkProcessor.h"
+#include "Processors/IAccumulatingTransform.h"
+#include "Processors/QueryPlan/IQueryPlanStep.h"
+#include "Processors/ResizeProcessor.h"
+#include "Processors/Transforms/CopyTransform.h"
 #include <Core/SortDescription.h>
 
 namespace DB
@@ -50,7 +58,7 @@ DistinctStep::DistinctStep(
     bool pre_distinct_)
     : ITransformingStep(
             input_header_,
-            input_header_,
+            DistinctTransform::transformHeader(input_header_, pre_distinct_),
             getTraits(pre_distinct_))
     , set_size_limits(set_size_limits_)
     , limit_hint(limit_hint_)
@@ -71,9 +79,6 @@ void DistinctStep::updateLimitHint(UInt64 hint)
 
 void DistinctStep::transformPipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &)
 {
-    if (!pre_distinct)
-        pipeline.resize(1);
-
     {
         if (!distinct_sort_desc.empty())
         {
@@ -94,6 +99,9 @@ void DistinctStep::transformPipeline(QueryPipelineBuilder & pipeline, const Buil
                             columns);
                     });
                 return;
+            } else
+            {
+                pipeline.resize(1);
             }
 
             /// final distinct for sorted stream (sorting inside and among chunks)
@@ -132,14 +140,34 @@ void DistinctStep::transformPipeline(QueryPipelineBuilder & pipeline, const Buil
         }
     }
 
-    pipeline.addSimpleTransform(
-        [&](const Block & header, QueryPipelineBuilder::StreamType stream_type) -> ProcessorPtr
-        {
-            if (stream_type != QueryPipelineBuilder::StreamType::Main)
-                return nullptr;
+    size_t threads = pipeline.getNumThreads();
 
-            return std::make_shared<DistinctTransform>(header, set_size_limits, limit_hint, columns);
-        });
+    auto header = pipeline.getHeader();
+
+    if (pre_distinct)
+    {
+        pipeline.addSimpleTransform(
+            [&](const Block &, QueryPipelineBuilder::StreamType stream_type) -> ProcessorPtr
+            {
+                if (stream_type != QueryPipelineBuilder::StreamType::Main)
+                    return nullptr;
+
+                return std::make_shared<DistinctTransform>(header, set_size_limits, limit_hint, columns, pre_distinct, threads);
+            });
+    }
+    else
+    {
+        pipeline.resize(1);
+
+        pipeline.addSimpleTransform(
+            [&](const Block &, QueryPipelineBuilder::StreamType stream_type) -> ProcessorPtr
+            {
+                if (stream_type != QueryPipelineBuilder::StreamType::Main)
+                    return nullptr;
+
+                return std::make_shared<DistinctTransform>(header, set_size_limits, limit_hint, columns, pre_distinct, threads);
+            });
+    }
 }
 
 void DistinctStep::describeActions(FormatSettings & settings) const
@@ -176,7 +204,7 @@ void DistinctStep::describeActions(JSONBuilder::JSONMap & map) const
 
 void DistinctStep::updateOutputHeader()
 {
-    output_header = input_headers.front();
+    output_header = DistinctTransform::transformHeader(input_headers.front(), pre_distinct);
 }
 
 void DistinctStep::serializeSettings(QueryPlanSerializationSettings & settings) const
