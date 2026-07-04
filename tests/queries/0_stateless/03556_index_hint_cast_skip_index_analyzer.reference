@@ -1,0 +1,5 @@
+analyzer=0 absent-needle	0
+analyzer=1 absent-needle	0
+analyzer=1 absent-needle data-read	0
+analyzer=0 present-needle	7
+analyzer=1 present-needle	7

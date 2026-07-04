@@ -1110,20 +1110,38 @@ static const ActionsDAG::Node & cloneDAGWithInversionPushDown(
             }
             else if (name == "indexHint")
             {
-                ActionsDAG::NodeRawConstPtrs children;
+                /// indexHint's arguments are not kept as DAG-node children: RPNBuilder reads them
+                /// from the FunctionIndexHint's own internal ActionsDAG. That internal DAG must go
+                /// through the same rewrite (inversion push-down + constant-name normalization) as
+                /// the rest of the tree, otherwise its constants keep their analyzer-form names
+                /// (e.g. `'Array(String)'_String`) and stop matching the index sample block's
+                /// AST-form names (`'Array(String)'`), silently dropping the skip index under the
+                /// new analyzer. Rebuild the internal DAG and wrap it in a fresh FunctionIndexHint.
+                FunctionBasePtr index_hint_function_base = node.function_base;
+
                 if (const auto * adaptor = typeid_cast<const FunctionToFunctionBaseAdaptor *>(node.function_base.get()))
                 {
                     if (const auto * index_hint = typeid_cast<const FunctionIndexHint *>(adaptor->getFunction().get()))
                     {
                         const auto & index_hint_dag = index_hint->getActions();
-                        children = index_hint_dag.getOutputs();
 
-                        for (auto & arg : children)
-                            arg = &cloneDAGWithInversionPushDown(*arg, inverted_dag, inputs_mapping, context, need_inversion, boolean_context);
+                        ActionsDAG rewritten_index_hint_dag;
+                        std::unordered_map<const ActionsDAG::Node *, const ActionsDAG::Node *> index_hint_inputs_mapping;
+                        ActionsDAG::NodeRawConstPtrs rewritten_outputs;
+                        rewritten_outputs.reserve(index_hint_dag.getOutputs().size());
+                        for (const auto * output : index_hint_dag.getOutputs())
+                            rewritten_outputs.push_back(&cloneDAGWithInversionPushDown(
+                                *output, rewritten_index_hint_dag, index_hint_inputs_mapping, context, need_inversion, boolean_context));
+                        rewritten_index_hint_dag.getOutputs() = std::move(rewritten_outputs);
+
+                        auto rewritten_index_hint = std::make_shared<FunctionIndexHint>();
+                        rewritten_index_hint->setActions(std::move(rewritten_index_hint_dag));
+                        index_hint_function_base = std::make_shared<FunctionToFunctionBaseAdaptor>(
+                            std::move(rewritten_index_hint), node.function_base->getArgumentTypes(), node.result_type);
                     }
                 }
 
-                res = &inverted_dag.addFunction(node.function_base, children, "");
+                res = &inverted_dag.addFunction(index_hint_function_base, {}, "");
                 handled_inversion = true;
             }
             else if (name == "materialize")
