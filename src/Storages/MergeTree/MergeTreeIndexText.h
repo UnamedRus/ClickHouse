@@ -3,6 +3,7 @@
 #include <Storages/MergeTree/IPostingListCodec.h>
 #include <Storages/MergeTree/MergeTreeIndices.h>
 #include <Storages/MergeTree/MergeTreeIndexConditionText.h>
+#include <Storages/MergeTree/TextIndexMapGranule.h>
 #include <Columns/IColumn.h>
 #include <Common/BitPackedStringArray.h>
 #include <Common/BitPackedUInt64Array.h>
@@ -477,7 +478,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
         std::unique_ptr<Arena> && arena_,
         std::unique_ptr<TokenToPositionListMap> && position_map_,
         SortedTokens && sorted_tokens_,
-        UInt64 map_stride_);
+        UInt64 map_stride_,
+        UInt64 map_key_stride_);
 
     ~MergeTreeIndexGranuleTextWritable() override = default;
 
@@ -500,6 +502,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
     SortedTokens sorted_tokens;
     /// Fixed per-row stride S (map_element mode); serialized in the header. eid = row*S + slot.
     UInt64 map_stride = 0;
+    /// Fixed per-granule key stride (map_element_granule mode); serialized in the header. kid = g*R + slot.
+    UInt64 map_key_stride = 0;
     LoggerPtr logger;
 };
 
@@ -530,6 +534,9 @@ struct MergeTreeIndexTextGranuleBuilder
     std::unique_ptr<MergeTreeIndexGranuleTextWritable> build();
     /// Recomputes provisional element ids as row*S + pos (map_element mode); called from build().
     void reassignMapElementIds();
+    /// Inserts a specific slot id into the posting list for a token (map_element_granule mode).
+    /// The token is already namespaced; this bypasses the tokenizer entirely.
+    void addTokenSlot(std::string_view token, UInt32 slot);
     bool empty() const { return is_empty; }
     void reset();
 
@@ -556,6 +563,9 @@ struct MergeTreeIndexTextGranuleBuilder
     std::vector<UInt64> map_row_element_counts;
     /// Fixed per-row stride computed at build() (= max row arity). Passed to the writable granule.
     UInt64 map_stride = 0;
+    /// Fixed per-granule key stride (map_element_granule mode). Set by assignGranuleKeySlots() and
+    /// passed to serializeBinaryWithMultipleStreams via the writable granule.
+    UInt64 map_key_stride = 0;
 };
 
 class MergeTreeIndexTextPreprocessor;
@@ -572,11 +582,18 @@ struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
         TokenizerPtr tokenizer_,
         const IPostingListCodec * posting_list_codec_,
         MergeTreeIndexTextPreprocessorPtr preprocessor_,
-        MergeTreeIndexTextPostprocessorPtr postprocessor_);
+        MergeTreeIndexTextPostprocessorPtr postprocessor_,
+        size_t index_granularity_rows_);
 
     ~MergeTreeIndexAggregatorText() override = default;
 
-    bool empty() const override { return granule_builder.empty(); }
+    bool empty() const override
+    {
+        /// In granule mode, entries accumulate in map_granule_entries (not in the builder) until dump time.
+        if (params.map_element_granule)
+            return map_granule_entries.empty();
+        return granule_builder.empty();
+    }
     MergeTreeIndexGranulePtr getGranuleAndReset() override;
     void update(const Block & block, size_t * pos, size_t limit) override;
     void setCurrentRow(size_t row) { granule_builder.setCurrentRow(row); }
@@ -590,12 +607,26 @@ private:
     /// Iterates over a ColumnMap slice and indexes each entry's key/value under a shared element id.
     void addMapDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read);
 
+    /// Iterates over a ColumnMap slice and accumulates per-granule distinct (key, value) sets.
+    /// Starts a new granule bucket every index_granularity_rows table rows.
+    void addMapGranuleDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read, size_t index_granularity_rows);
+
+    /// Dump-time: run computeMapGranuleSlots on the accumulated entries, insert namespaced tokens
+    /// into the granule builder with their slot ids, and store the key stride.
+    void assignGranuleKeySlots();
+
     String index_column_name;
     MergeTreeIndexTextParams params;
     TokenizerPtr tokenizer;
     MergeTreeIndexTextGranuleBuilder granule_builder;
     MergeTreeIndexTextPreprocessorPtr preprocessor;
     MergeTreeIndexTextPostprocessorPtr postprocessor;
+    /// MergeTree index_granularity in rows — used to split map entries into per-granule buckets.
+    size_t index_granularity_rows = 0;
+    /// Granule map mode: entries of the granule currently being filled (distinct keys -> distinct values).
+    MapGranuleEntries map_granule_entries;
+    /// Rows consumed into the current (open) map granule; flushed at index_granularity_rows.
+    size_t map_granule_open_rows = 0;
 };
 
 class MergeTreeIndexText final : public IMergeTreeIndex
@@ -606,7 +637,8 @@ public:
         const IndexDescription & index_,
         MergeTreeIndexTextParams params_,
         std::unique_ptr<ITokenizer> tokenizer_,
-        std::unique_ptr<IPostingListCodec> posting_list_codec_);
+        std::unique_ptr<IPostingListCodec> posting_list_codec_,
+        size_t index_granularity_rows_);
 
     ~MergeTreeIndexText() override = default;
 
@@ -631,6 +663,9 @@ public:
     std::unique_ptr<IPostingListCodec> posting_list_codec;
     MergeTreeIndexTextPreprocessorPtr preprocessor;
     MergeTreeIndexTextPostprocessorPtr postprocessor;
+    /// MergeTree `index_granularity` in rows, threaded from the table settings at creation time.
+    /// Used by the granule-mode map aggregator to know when to start a new per-granule bucket.
+    size_t index_granularity_rows = 0;
 };
 
 }

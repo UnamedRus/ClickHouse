@@ -1,5 +1,6 @@
 #include <Storages/MergeTree/MergeTreeIndexText.h>
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
+#include <Storages/MergeTree/TextIndexMapGranule.h>
 
 #include <Columns/ColumnArray.h>
 #include <Columns/ColumnMap.h>
@@ -77,6 +78,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsNonZeroUInt64 text_index_posting_list_block_size;
     extern const MergeTreeSettingsTextIndexPostingListCodec text_index_posting_list_codec;
     extern const MergeTreeSettingsBool allow_experimental_text_index_phrase_search;
+    extern const MergeTreeSettingsUInt64 index_granularity;
 }
 
 namespace Setting
@@ -968,7 +970,8 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     std::unique_ptr<Arena> && arena_,
     std::unique_ptr<TokenToPositionListMap> && position_map_,
     SortedTokens && sorted_tokens_,
-    UInt64 map_stride_)
+    UInt64 map_stride_,
+    UInt64 map_key_stride_)
     : params(std::move(params_))
     , posting_list_codec_type(posting_list_codec_type_)
     , tokens_map(std::move(tokens_map_))
@@ -977,6 +980,7 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     , position_map(std::move(position_map_))
     , sorted_tokens(std::move(sorted_tokens_))
     , map_stride(map_stride_)
+    , map_key_stride(map_key_stride_)
     , logger(getLogger("TextIndexGranuleWriter"))
 {
 }
@@ -1626,7 +1630,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         postings_serialization,
         positions_stream);
 
-    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, params.map_element_granule, /*map_key_stride=*/0, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, params.map_element_granule, map_key_stride, index_stream->compressed_hashing);
 }
 
 void MergeTreeIndexGranuleTextWritable::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
@@ -1754,6 +1758,21 @@ void MergeTreeIndexTextGranuleBuilder::addToken(std::string_view token, UInt32 t
         positions_builder.add(static_cast<UInt32>(current_row), token_position);
     }
 
+    ++num_processed_tokens;
+}
+
+void MergeTreeIndexTextGranuleBuilder::addTokenSlot(std::string_view token, UInt32 slot)
+{
+    /// Insert a specific slot id into the posting list for the (already-namespaced) token.
+    /// This is the map_element_granule insertion path: bypass tokenizer and current_row.
+    bool inserted = false;
+    TokenToPostingsBuilderMap::LookupResult it;
+    ArenaKeyHolder key_holder(token, *arena);
+    tokens_map.emplace(key_holder, it, inserted);
+
+    PostingListBuilder & posting_list_builder = it->getMapped();
+    posting_list_builder.add(slot, posting_lists);
+    is_empty = false;
     ++num_processed_tokens;
 }
 
@@ -1905,7 +1924,8 @@ std::unique_ptr<MergeTreeIndexGranuleTextWritable> MergeTreeIndexTextGranuleBuil
         std::move(arena),
         std::move(position_map),
         std::move(sorted_tokens),
-        map_stride);
+        map_stride,
+        map_key_stride);
 }
 
 void MergeTreeIndexTextGranuleBuilder::reset()
@@ -1917,6 +1937,7 @@ void MergeTreeIndexTextGranuleBuilder::reset()
     posting_lists.clear();
     map_row_element_counts.clear();
     map_stride = 0;
+    map_key_stride = 0;
     arena = std::make_unique<Arena>();
 
     if (params.positions)
@@ -1931,18 +1952,23 @@ MergeTreeIndexAggregatorText::MergeTreeIndexAggregatorText(
     TokenizerPtr tokenizer_,
     const IPostingListCodec * posting_list_codec_,
     MergeTreeIndexTextPreprocessorPtr preprocessor_,
-    MergeTreeIndexTextPostprocessorPtr postprocessor_)
+    MergeTreeIndexTextPostprocessorPtr postprocessor_,
+    size_t index_granularity_rows_)
     : index_column_name(std::move(index_column_name_))
     , params(std::move(params_))
     , tokenizer(tokenizer_)
     , granule_builder(params, tokenizer_, posting_list_codec_)
     , preprocessor(preprocessor_)
     , postprocessor(postprocessor_)
+    , index_granularity_rows(index_granularity_rows_)
 {
 }
 
 MergeTreeIndexGranulePtr MergeTreeIndexAggregatorText::getGranuleAndReset()
 {
+    if (params.map_element_granule)
+        assignGranuleKeySlots();
+
     auto granule = granule_builder.build();
     granule_builder.reset();
     return granule;
@@ -1955,6 +1981,18 @@ void MergeTreeIndexAggregatorText::update(const Block & block, size_t * pos, siz
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "The provided position is not less than the number of block rows. Position: {}, Block rows: {}",
             *pos, block.rows());
+    }
+
+    if (params.map_element_granule)
+    {
+        const size_t rows_read = std::min(limit, block.rows() - *pos);
+        if (rows_read == 0)
+            return;
+
+        const auto & index_column = block.getByName(index_column_name);
+        addMapGranuleDocuments(index_column.column, *pos, rows_read, index_granularity_rows);
+        *pos += rows_read;
+        return;
     }
 
     if (params.map_element)
@@ -2079,18 +2117,79 @@ void MergeTreeIndexAggregatorText::addMapDocuments(const ColumnPtr & column, siz
     }
 }
 
+void MergeTreeIndexAggregatorText::addMapGranuleDocuments(
+    const ColumnPtr & column, size_t start_row, size_t rows_read, size_t index_granularity_rows_)
+{
+    const auto full_column = column->convertToFullColumnIfConst();
+    const auto & column_map = assert_cast<const ColumnMap &>(*full_column);
+    const auto & column_array = column_map.getNestedColumn();
+    const IColumn::Offsets & offsets = column_array.getOffsets();
+    const auto & tuple = column_map.getNestedData();
+    const IColumn & keys = tuple.getColumn(0);
+    const IColumn & values = tuple.getColumn(1);
+
+    auto open_new_granule = [&]()
+    {
+        map_granule_entries.emplace_back();
+        map_granule_open_rows = 0;
+    };
+
+    if (map_granule_entries.empty())
+        open_new_granule();
+
+    for (size_t row = start_row; row < start_row + rows_read; ++row)
+    {
+        if (index_granularity_rows_ > 0 && map_granule_open_rows == index_granularity_rows_)
+            open_new_granule();
+
+        auto & granule = map_granule_entries.back();
+        /// ColumnArray::Offsets guarantees offsets[-1] == 0, so row == 0 is fine.
+        const size_t row_begin = offsets[row - 1];
+        const size_t row_end = offsets[row];
+
+        for (size_t e = row_begin; e < row_end; ++e)
+        {
+            String key{keys.getDataAt(e)};
+            String value{values.getDataAt(e)};
+
+            /// Find-or-add the key in this granule (small K; linear scan is fine), dedup values.
+            auto it = std::find_if(granule.begin(), granule.end(), [&](const auto & kv) { return kv.first == key; });
+            if (it == granule.end())
+                granule.push_back({key, {value}});
+            else if (std::find(it->second.begin(), it->second.end(), value) == it->second.end())
+                it->second.push_back(value);
+        }
+        ++map_granule_open_rows;
+    }
+}
+
+void MergeTreeIndexAggregatorText::assignGranuleKeySlots()
+{
+    const MapGranuleSlots slots = computeMapGranuleSlots(map_granule_entries);
+    granule_builder.map_key_stride = slots.stride;
+
+    for (const auto & [token, ids] : slots.postings)
+        for (UInt32 kid : ids)
+            granule_builder.addTokenSlot(token, kid);
+
+    map_granule_entries.clear();
+    map_granule_open_rows = 0;
+}
+
 MergeTreeIndexText::MergeTreeIndexText(
     StorageMetadataPtr metadata_snapshot_,
     const IndexDescription & index_,
     MergeTreeIndexTextParams params_,
     std::unique_ptr<ITokenizer> tokenizer_,
-    std::unique_ptr<IPostingListCodec> posting_list_codec_)
+    std::unique_ptr<IPostingListCodec> posting_list_codec_,
+    size_t index_granularity_rows_)
     : IMergeTreeIndex(std::move(metadata_snapshot_), index_)
     , params(std::move(params_))
     , tokenizer(std::move(tokenizer_))
     , posting_list_codec(std::move(posting_list_codec_))
     , preprocessor(std::make_shared<MergeTreeIndexTextPreprocessor>(params.preprocessor, index_))
     , postprocessor(std::make_shared<MergeTreeIndexTextPostprocessor>(params.postprocessor, index_))
+    , index_granularity_rows(index_granularity_rows_)
 {
 }
 
@@ -2141,7 +2240,7 @@ MergeTreeIndexGranulePtr MergeTreeIndexText::createIndexGranule() const
 
 MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 {
-    return std::make_shared<MergeTreeIndexAggregatorText>(index.column_names[0], params, tokenizer.get(), posting_list_codec.get(), preprocessor, postprocessor);
+    return std::make_shared<MergeTreeIndexAggregatorText>(index.column_names[0], params, tokenizer.get(), posting_list_codec.get(), preprocessor, postprocessor, index_granularity_rows);
 }
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
@@ -2306,7 +2405,9 @@ MergeTreeIndexPtr textIndexCreator(StorageMetadataPtr metadata_snapshot, const I
     if (!options.empty())
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unexpected text index arguments: {}", fmt::join(std::views::keys(options), ", "));
 
-    return std::make_shared<MergeTreeIndexText>(std::move(metadata_snapshot), index, index_params, std::move(tokenizer), std::move(posting_list_codec));
+    const size_t index_granularity_rows = settings[MergeTreeSetting::index_granularity];
+
+    return std::make_shared<MergeTreeIndexText>(std::move(metadata_snapshot), index, index_params, std::move(tokenizer), std::move(posting_list_codec), index_granularity_rows);
 }
 
 void textIndexValidator(const IndexDescription & index, bool /*attach*/, const MergeTreeSettings & settings)
