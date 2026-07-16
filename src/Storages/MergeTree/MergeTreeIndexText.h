@@ -420,8 +420,8 @@ public:
     /// Map-element-granule mode: postings are slot ids `kid = chunk*R + local_slot`.
     /// `and_queries` are ANDed together (key + optional single value for equals/key-only/value-only).
     /// `or_value_queries` are ORed for IN queries (one per value needle in the IN list).
-    /// When current_range is set, the matching slot ids are converted to chunk indices and
-    /// intersected with the chunk range covered by the current row range.
+    /// When `current_mark` is set, the matching slot ids are converted to mark ordinals (`kid / R`)
+    /// and compared against `current_mark`. Chunks align one-to-one with write-granule marks.
     bool hasMapEntryGranule(
         const std::vector<TextSearchQueryPtr> & and_queries,
         const std::vector<TextSearchQueryPtr> & or_value_queries) const;
@@ -429,6 +429,9 @@ public:
     const TextIndexAnalyzer & getAnalyzer() const { return *analyzer; }
 
     void setCurrentRange(RowsRange range) { current_range = std::move(range); }
+    /// Sets the mark ordinal for the current mark being evaluated (map_element_granule mode).
+    /// `kid / map_key_stride` == the chunk ordinal == the write-granule (mark) ordinal at build time.
+    void setCurrentMark(size_t mark) { current_mark = mark; }
     const String & getIndexIdForCaches() const { return index_id_for_caches; }
     IPostingListCodec::Type getPostingsCodecType() const { return postings_codec_type; }
     MergeTreeIndexVersion getSerializationVersion() const { return serialization_version; }
@@ -463,6 +466,9 @@ private:
     std::unique_ptr<TextIndexAnalyzer> analyzer;
     /// Current range of rows that is being processed. If set, mayBeTrueOnGranule returns more precise result.
     std::optional<RowsRange> current_range;
+    /// Current mark ordinal being evaluated (map_element_granule mode). The chunk ordinal embedded in
+    /// slot ids (`kid / map_key_stride`) equals the write-granule (mark) ordinal at build time.
+    std::optional<size_t> current_mark;
     /// Unique identifier for text index in the current data part.
     String index_id_for_caches;
     /// Codec type used to serialize postings in this granule.
@@ -473,11 +479,8 @@ private:
     /// matching element ids back to rows for per-mark localization.
     UInt64 map_stride = 0;
     /// Fixed per-granule key stride (map_element_granule mode): slot id = chunk * R + local_slot,
-    /// where chunk = floor(absolute_row / index_granularity). Loaded from the header.
+    /// where chunk == the write-granule (mark) ordinal. Loaded from the header.
     UInt64 map_key_stride = 0;
-    /// Number of rows per index granule (map_element_granule mode). Loaded from the part's
-    /// index_granularity during deserialization; used to map row ranges to chunk indices.
-    UInt64 index_granularity_rows = 0;
 };
 
 /// Text index granule created on writing of the index.
@@ -597,8 +600,7 @@ struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
         TokenizerPtr tokenizer_,
         const IPostingListCodec * posting_list_codec_,
         MergeTreeIndexTextPreprocessorPtr preprocessor_,
-        MergeTreeIndexTextPostprocessorPtr postprocessor_,
-        size_t index_granularity_rows_);
+        MergeTreeIndexTextPostprocessorPtr postprocessor_);
 
     ~MergeTreeIndexAggregatorText() override = default;
 
@@ -623,8 +625,8 @@ private:
     void addMapDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read);
 
     /// Iterates over a ColumnMap slice and accumulates per-granule distinct (key, value) sets.
-    /// Starts a new granule bucket every index_granularity_rows table rows.
-    void addMapGranuleDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read, size_t index_granularity_rows);
+    /// Called exactly once per write-granule (mark); opens a new chunk bucket per call.
+    void addMapGranuleDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read);
 
     /// Dump-time: run computeMapGranuleSlots on the accumulated entries, insert namespaced tokens
     /// into the granule builder with their slot ids, and store the key stride.
@@ -636,12 +638,8 @@ private:
     MergeTreeIndexTextGranuleBuilder granule_builder;
     MergeTreeIndexTextPreprocessorPtr preprocessor;
     MergeTreeIndexTextPostprocessorPtr postprocessor;
-    /// MergeTree index_granularity in rows — used to split map entries into per-granule buckets.
-    size_t index_granularity_rows = 0;
     /// Granule map mode: entries of the granule currently being filled (distinct keys -> distinct values).
     MapGranuleEntries map_granule_entries;
-    /// Rows consumed into the current (open) map granule; flushed at index_granularity_rows.
-    size_t map_granule_open_rows = 0;
 };
 
 class MergeTreeIndexText final : public IMergeTreeIndex
@@ -652,8 +650,7 @@ public:
         const IndexDescription & index_,
         MergeTreeIndexTextParams params_,
         std::unique_ptr<ITokenizer> tokenizer_,
-        std::unique_ptr<IPostingListCodec> posting_list_codec_,
-        size_t index_granularity_rows_);
+        std::unique_ptr<IPostingListCodec> posting_list_codec_);
 
     ~MergeTreeIndexText() override = default;
 
@@ -678,9 +675,6 @@ public:
     std::unique_ptr<IPostingListCodec> posting_list_codec;
     MergeTreeIndexTextPreprocessorPtr preprocessor;
     MergeTreeIndexTextPostprocessorPtr postprocessor;
-    /// MergeTree `index_granularity` in rows, threaded from the table settings at creation time.
-    /// Used by the granule-mode map aggregator to know when to start a new per-granule bucket.
-    size_t index_granularity_rows = 0;
 };
 
 }

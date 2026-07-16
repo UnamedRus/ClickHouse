@@ -2507,6 +2507,7 @@ std::pair<MarkRanges, RangesInDataPartReadHints> MergeTreeDataSelectExecutor::fi
                     continue;
 
                 granule_text.setCurrentRange(RowsRange(row_begin, row_end - 1));
+                granule_text.setCurrentMark(mark);
                 bool may_be_true = condition->mayBeTrueOnGranule(granule, create_update_partial_disjunction_result_fn(mark));
 
                 if (may_be_true)
