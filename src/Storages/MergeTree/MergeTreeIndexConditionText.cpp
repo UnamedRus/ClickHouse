@@ -54,6 +54,16 @@ namespace Setting
     extern const SettingsBool reject_expensive_hyperscan_regexps;
 }
 
+/// Returns true if `v` is the default value of a map value type:
+/// empty `String` ("") or all-zero `FixedString(N)` (N zero bytes).
+/// Both cases mean "absent key", so pruning on such a needle would produce false negatives.
+static bool isMapValueDefault(std::string_view v)
+{
+    if (v.empty())
+        return true;
+    return std::all_of(v.begin(), v.end(), [](char c) { return c == '\0'; });
+}
+
 TextSearchQuery::TextSearchQuery(String function_name_, TextSearchMode search_mode_, TextIndexDirectReadMode direct_read_mode_, VectorWithMemoryTracking<String> tokens_, std::vector<OptimizedRegularExpression> patterns_)
     : function_name(std::move(function_name_))
     , search_mode(search_mode_)
@@ -855,8 +865,10 @@ bool MergeTreeIndexConditionText::traverseFunctionNode(
 
         if (auto parsed = tryParseMapGranuleArrayElement(index_column_node))
         {
-            /// Default-value carve-out: m['key'] returns "" for absent keys, so equals("") cannot prune.
-            if (value_str.empty())
+            /// Default-value carve-out: `m['key']` returns the value type's default for absent keys,
+            /// so `equals` on that default cannot prune. For `String` the default is ""; for
+            /// `FixedString(N)` it is N zero bytes — both are detected by `isMapValueDefault`.
+            if (isMapValueDefault(value_str))
                 return false;
 
             const String & key_str = parsed->second;
@@ -1869,9 +1881,10 @@ bool MergeTreeIndexConditionText::tryPrepareMapGranuleSetForTextSearch(
     {
         auto ref = set_column.getDataAt(row);
 
-        /// Default-value carve-out: if ANY value in the IN list is the String default (""),
-        /// we cannot prune — return false (non-pruning / fail-open).
-        if (ref.empty())
+        /// Default-value carve-out: if ANY value in the IN list is the value type's default,
+        /// we cannot prune — return false (non-pruning / fail-open). For `String` the default
+        /// is ""; for `FixedString(N)` it is N zero bytes — both caught by `isMapValueDefault`.
+        if (isMapValueDefault(ref))
         {
             out.text_search_queries.clear();
             return false;
