@@ -292,6 +292,18 @@ MergeTextIndexesTask::MergeTextIndexesTask(
             source_map_stride[i] = header.map_stride ? header.map_stride : 1;
             merged_map_stride = std::max(merged_map_stride, source_map_stride[i]);
         }
+
+        if (params.map_element_granule)
+        {
+            /// Granule-mode merge rebuilds a single segment from the merged Map column; take its
+            /// key stride and row-window straight from that segment's header. With multiple segments
+            /// (should not happen for granule mode) the last non-zero value wins, which is still the
+            /// rebuilt segment's value since it is the sole source.
+            if (header.map_key_stride != 0)
+                merged_map_key_stride = header.map_key_stride;
+            if (header.map_chunk_window != 0)
+                merged_map_chunk_window = header.map_chunk_window;
+        }
     }
 }
 
@@ -801,7 +813,7 @@ void MergeTextIndexesTask::finalize()
     else if (params.positions)
         version_enum = TextIndexHeader::Version::WithPositions;
     auto serialization_version = static_cast<MergeTreeIndexVersion>(version_enum);
-    TextIndexSerialization::serializeHeader(sparse_index, postings_serialization.getPostingListCodec()->getType(), serialization_version, params.positions, params.map_element, merged_map_stride, params.map_element_granule, /*map_key_stride=*/0, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeHeader(sparse_index, postings_serialization.getPostingListCodec()->getType(), serialization_version, params.positions, params.map_element, merged_map_stride, params.map_element_granule, merged_map_key_stride, merged_map_chunk_window, index_stream->compressed_hashing);
 
     for (auto & stream : output_streams_holders)
         stream->finalize();

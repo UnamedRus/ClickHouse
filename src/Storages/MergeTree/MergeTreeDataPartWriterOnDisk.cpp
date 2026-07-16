@@ -291,7 +291,11 @@ void MergeTreeDataPartWriterOnDisk::calculateAndSerializeSkipIndices(const Block
             if (query_status)
                 query_status->checkTimeLimit();
 
-            if (skip_index_accumulated_marks[i] == index_helper->index.granularity)
+            /// Aggregators that accumulate across boundaries (e.g. `map_element_granule` text index)
+            /// write ONE block for the whole part; dumping here would split their data across multiple
+            /// unreadable blocks and corrupt the index. Such aggregators are flushed at finalization.
+            if (!skip_indices_aggregators[i]->accumulatesAcrossBoundaries()
+                && skip_index_accumulated_marks[i] == index_helper->index.granularity)
             {
                 auto index_granule = skip_indices_aggregators[i]->getGranuleAndReset();
                 index_granule->serializeBinaryWithMultipleStreams(index_streams);

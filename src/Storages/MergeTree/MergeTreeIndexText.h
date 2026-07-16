@@ -339,6 +339,9 @@ struct TextIndexHeader
     bool map_element_granule = false;
     /// Persisted for version >= WithMapElementGranule. Fixed per-granule slot stride: kid = g*R + slot.
     UInt64 map_key_stride = 0;
+    /// Persisted for version >= WithMapElementGranule. Row-window size W used to assign chunk indices:
+    /// chunk = abs_row / W. Equals the `index_granularity` setting at write time.
+    UInt64 map_chunk_window = 0;
     DictionarySparseIndex sparse_index;
 };
 
@@ -358,7 +361,7 @@ struct TextIndexSerialization
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
     static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);
-    static void serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, bool map_element_granule, UInt64 map_key_stride, WriteBuffer & ostr);
+    static void serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, bool map_element_granule, UInt64 map_key_stride, UInt64 map_chunk_window, WriteBuffer & ostr);
 
     static TextIndexHeader deserializeHeader(ReadBuffer & istr);
     /// Reads only the version and posting list codec from the start of the header, without the
@@ -420,8 +423,9 @@ public:
     /// Map-element-granule mode: postings are slot ids `kid = chunk*R + local_slot`.
     /// `and_queries` are ANDed together (key + optional single value for equals/key-only/value-only).
     /// `or_value_queries` are ORed for IN queries (one per value needle in the IN list).
-    /// When `current_mark` is set, the matching slot ids are converted to mark ordinals (`kid / R`)
-    /// and compared against `current_mark`. Chunks align one-to-one with write-granule marks.
+    /// When `current_range` and `map_chunk_window` (W) are set, the matching slot ids are mapped to
+    /// chunk indices via `kid / R` and intersected with the chunk range `[row_begin/W, (row_end-1)/W]`
+    /// derived from the current mark's row range. Chunks align with absolute-row windows of size W.
     bool hasMapEntryGranule(
         const std::vector<TextSearchQueryPtr> & and_queries,
         const std::vector<TextSearchQueryPtr> & or_value_queries) const;
@@ -429,9 +433,6 @@ public:
     const TextIndexAnalyzer & getAnalyzer() const { return *analyzer; }
 
     void setCurrentRange(RowsRange range) { current_range = std::move(range); }
-    /// Sets the mark ordinal for the current mark being evaluated (map_element_granule mode).
-    /// `kid / map_key_stride` == the chunk ordinal == the write-granule (mark) ordinal at build time.
-    void setCurrentMark(size_t mark) { current_mark = mark; }
     const String & getIndexIdForCaches() const { return index_id_for_caches; }
     IPostingListCodec::Type getPostingsCodecType() const { return postings_codec_type; }
     MergeTreeIndexVersion getSerializationVersion() const { return serialization_version; }
@@ -464,11 +465,8 @@ private:
     MergeTreeIndexTextParams params;
     /// Analyzer for the text index. Tracks regular tokens, pattern tokens, and per-query state.
     std::unique_ptr<TextIndexAnalyzer> analyzer;
-    /// Current range of rows that is being processed. If set, mayBeTrueOnGranule returns more precise result.
+    /// Current range of rows that is being processed. If set, `mayBeTrueOnGranule` returns more precise result.
     std::optional<RowsRange> current_range;
-    /// Current mark ordinal being evaluated (map_element_granule mode). The chunk ordinal embedded in
-    /// slot ids (`kid / map_key_stride`) equals the write-granule (mark) ordinal at build time.
-    std::optional<size_t> current_mark;
     /// Unique identifier for text index in the current data part.
     String index_id_for_caches;
     /// Codec type used to serialize postings in this granule.
@@ -478,9 +476,12 @@ private:
     /// Fixed per-row stride (map_element mode): element id = row * map_stride + slot. Used to map
     /// matching element ids back to rows for per-mark localization.
     UInt64 map_stride = 0;
-    /// Fixed per-granule key stride (map_element_granule mode): slot id = chunk * R + local_slot,
-    /// where chunk == the write-granule (mark) ordinal. Loaded from the header.
+    /// Fixed per-granule key stride (map_element_granule mode): slot id = chunk * R + local_slot.
+    /// Loaded from the header.
     UInt64 map_key_stride = 0;
+    /// Row-window size W (map_element_granule mode): chunk = abs_row / W. Persisted in the header
+    /// so that ALTER of `index_granularity` after a part is written cannot break reads.
+    UInt64 map_chunk_window = 0;
 };
 
 /// Text index granule created on writing of the index.
@@ -497,7 +498,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
         std::unique_ptr<TokenToPositionListMap> && position_map_,
         SortedTokens && sorted_tokens_,
         UInt64 map_stride_,
-        UInt64 map_key_stride_);
+        UInt64 map_key_stride_,
+        UInt64 map_chunk_window_);
 
     ~MergeTreeIndexGranuleTextWritable() override = default;
 
@@ -522,6 +524,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
     UInt64 map_stride = 0;
     /// Fixed per-granule key stride (map_element_granule mode); serialized in the header. kid = g*R + slot.
     UInt64 map_key_stride = 0;
+    /// Row-window size W (map_element_granule mode); serialized in the header. chunk = abs_row / W.
+    UInt64 map_chunk_window = 0;
     LoggerPtr logger;
 };
 
@@ -584,6 +588,9 @@ struct MergeTreeIndexTextGranuleBuilder
     /// Fixed per-granule key stride (map_element_granule mode). Set by assignGranuleKeySlots() and
     /// passed to serializeBinaryWithMultipleStreams via the writable granule.
     UInt64 map_key_stride = 0;
+    /// Row-window size W (map_element_granule mode). chunk = abs_row / W. Set by assignGranuleKeySlots()
+    /// and persisted in the header via the writable granule so reads can reconstruct chunk boundaries.
+    UInt64 map_chunk_window = 0;
 };
 
 class MergeTreeIndexTextPreprocessor;
@@ -600,17 +607,23 @@ struct MergeTreeIndexAggregatorText final : IMergeTreeIndexAggregator
         TokenizerPtr tokenizer_,
         const IPostingListCodec * posting_list_codec_,
         MergeTreeIndexTextPreprocessorPtr preprocessor_,
-        MergeTreeIndexTextPostprocessorPtr postprocessor_);
+        MergeTreeIndexTextPostprocessorPtr postprocessor_,
+        size_t map_chunk_window_);
 
     ~MergeTreeIndexAggregatorText() override = default;
 
     bool empty() const override
     {
-        /// In granule mode, entries accumulate in map_granule_entries (not in the builder) until dump time.
         if (params.map_element_granule)
             return map_granule_entries.empty();
         return granule_builder.empty();
     }
+
+    /// In `map_element_granule` mode the index accumulates ALL marks into ONE skip-index block so
+    /// the reader (which seeks to mark 0 and reads the whole file in one shot) can find every
+    /// mark's data. The writer must not dump mid-loop or create a fresh aggregator per mark.
+    bool accumulatesAcrossBoundaries() const override { return params.map_element_granule; }
+
     MergeTreeIndexGranulePtr getGranuleAndReset() override;
     void update(const Block & block, size_t * pos, size_t limit) override;
     void setCurrentRow(size_t row) { granule_builder.setCurrentRow(row); }
@@ -625,7 +638,9 @@ private:
     void addMapDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read);
 
     /// Iterates over a ColumnMap slice and accumulates per-granule distinct (key, value) sets.
-    /// Called exactly once per write-granule (mark); opens a new chunk bucket per call.
+    /// Accumulates map entries from [start_row, start_row+rows_read) into per-chunk buckets.
+    /// Each row is assigned chunk = (cumulative_rows + local_row_offset) / map_chunk_window_,
+    /// making chunk boundaries independent of `update` call cadence and block sizes.
     void addMapGranuleDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read);
 
     /// Dump-time: run computeMapGranuleSlots on the accumulated entries, insert namespaced tokens
@@ -638,7 +653,14 @@ private:
     MergeTreeIndexTextGranuleBuilder granule_builder;
     MergeTreeIndexTextPreprocessorPtr preprocessor;
     MergeTreeIndexTextPostprocessorPtr postprocessor;
-    /// Granule map mode: entries of the granule currently being filled (distinct keys -> distinct values).
+    /// Row-window size W for chunk assignment (map_element_granule mode). chunk = abs_row / W.
+    /// Persisted in the header so reads can reconstruct the same chunk boundaries.
+    size_t map_chunk_window_ = 0;
+    /// Cumulative row counter across all `update` calls (map_element_granule mode).
+    /// Preserved between calls; never reset between marks so chunk = cumulative_rows / W is absolute.
+    size_t cumulative_rows = 0;
+    /// Per-chunk map entries (map_element_granule mode): indexed by chunk = abs_row / W.
+    /// Entries within the same chunk from multiple `update` calls are merged into the same bucket.
     MapGranuleEntries map_granule_entries;
 };
 
@@ -650,7 +672,8 @@ public:
         const IndexDescription & index_,
         MergeTreeIndexTextParams params_,
         std::unique_ptr<ITokenizer> tokenizer_,
-        std::unique_ptr<IPostingListCodec> posting_list_codec_);
+        std::unique_ptr<IPostingListCodec> posting_list_codec_,
+        size_t map_chunk_window_);
 
     ~MergeTreeIndexText() override = default;
 
@@ -675,6 +698,9 @@ public:
     std::unique_ptr<IPostingListCodec> posting_list_codec;
     MergeTreeIndexTextPreprocessorPtr preprocessor;
     MergeTreeIndexTextPostprocessorPtr postprocessor;
+    /// Row-window size for chunk assignment (map_element_granule mode). Equals `index_granularity` at
+    /// index creation time and is persisted in the header for correctness across settings changes.
+    size_t map_chunk_window = 0;
 };
 
 }

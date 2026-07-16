@@ -147,6 +147,11 @@ struct IMergeTreeIndexAggregator
     /// Reads no more than `limit` rows.
     /// After finishing updating `pos` will store the position of the first row which was not read.
     virtual void update(const Block & block, size_t * pos, size_t limit) = 0;
+
+    /// Returns true if this aggregator accumulates data across skip-index granularity boundaries and
+    /// must NOT be dumped mid-loop. The writer will suppress per-boundary dumps and new-aggregator
+    /// creation, calling `getGranuleAndReset` exactly once at part finalization.
+    virtual bool accumulatesAcrossBoundaries() const { return false; }
 };
 
 using MergeTreeIndexAggregatorPtr = std::shared_ptr<IMergeTreeIndexAggregator>;

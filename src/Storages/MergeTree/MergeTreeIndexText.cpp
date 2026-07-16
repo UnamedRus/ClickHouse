@@ -78,6 +78,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsNonZeroUInt64 text_index_posting_list_block_size;
     extern const MergeTreeSettingsTextIndexPostingListCodec text_index_posting_list_codec;
     extern const MergeTreeSettingsBool allow_experimental_text_index_phrase_search;
+    extern const MergeTreeSettingsUInt64 index_granularity;
 }
 
 namespace Setting
@@ -502,6 +503,7 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
     serialization_version = text_index_header->version;
     map_stride = text_index_header->map_stride;
     map_key_stride = text_index_header->map_key_stride;
+    map_chunk_window = text_index_header->map_chunk_window;
 
     analyzeDictionaryForTokens(text_index_header->sparse_index, postings_serialization, *dictionary_stream, state);
     analyzeDictionaryForPatterns(text_index_header->sparse_index, postings_serialization, *dictionary_stream, state);
@@ -1051,20 +1053,21 @@ bool MergeTreeIndexGranuleText::hasMapEntryGranule(
             return false;
     }
 
-    /// Phase 3: Map slot ids to mark ordinals and compare with the current mark.
-    /// Each chunk (`kid / map_key_stride`) corresponds one-to-one to a write-granule (mark ordinal)
-    /// because `addMapGranuleDocuments` opens exactly one new chunk bucket per `update()` call,
-    /// and `update()` is called exactly once per write-granule.
-    if (!current_mark.has_value() || map_key_stride == 0)
+    /// Phase 3: Map slot ids to chunk indices and intersect with the current mark's chunk range.
+    /// chunk = kid / map_key_stride. At build time each row was placed in chunk = abs_row / W,
+    /// where W = map_chunk_window (persisted in the header). The mark's absolute row range
+    /// [row_begin, row_end] covers chunks [row_begin/W .. row_end/W].
+    if (!current_range.has_value() || map_key_stride == 0 || map_chunk_window == 0)
         return true; /// Part-level fallback: non-empty posting -> keep.
 
-    const UInt64 mark = *current_mark;
+    const UInt64 chunk_begin = current_range->begin / map_chunk_window;
+    const UInt64 chunk_end = current_range->end / map_chunk_window;
 
-    /// Check if any slot id in and_result maps to the current mark ordinal.
+    /// Check if any slot id in and_result maps to a chunk in [chunk_begin, chunk_end].
     for (UInt32 kid : *and_result)
     {
         const UInt64 chunk = granuleOfSlot(kid, map_key_stride);
-        if (chunk == mark)
+        if (chunk >= chunk_begin && chunk <= chunk_end)
             return true;
     }
 
@@ -1081,7 +1084,8 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     std::unique_ptr<TokenToPositionListMap> && position_map_,
     SortedTokens && sorted_tokens_,
     UInt64 map_stride_,
-    UInt64 map_key_stride_)
+    UInt64 map_key_stride_,
+    UInt64 map_chunk_window_)
     : params(std::move(params_))
     , posting_list_codec_type(posting_list_codec_type_)
     , tokens_map(std::move(tokens_map_))
@@ -1091,6 +1095,7 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     , sorted_tokens(std::move(sorted_tokens_))
     , map_stride(map_stride_)
     , map_key_stride(map_key_stride_)
+    , map_chunk_window(map_chunk_window_)
     , logger(getLogger("TextIndexGranuleWriter"))
 {
 }
@@ -1341,7 +1346,7 @@ void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenP
     }
 }
 
-void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, bool map_element_granule, UInt64 map_key_stride, WriteBuffer & ostr)
+void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, bool map_element_granule, UInt64 map_key_stride, UInt64 map_chunk_window, WriteBuffer & ostr)
 {
     UInt64 codec_type = static_cast<UInt64>(posting_list_codec_type);
 
@@ -1361,6 +1366,7 @@ void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & spars
     {
         writeVarUInt(static_cast<UInt64>(map_element_granule), ostr);
         writeVarUInt(map_key_stride, ostr);
+        writeVarUInt(map_chunk_window, ostr);
     }
 
     /// Sparse indexes are created with raw columns and bit-packed only by optimize.
@@ -1420,6 +1426,7 @@ TextIndexHeader TextIndexSerialization::deserializeHeaderPrefix(ReadBuffer & ist
         readVarUInt(mg, istr);
         header.map_element_granule = mg != 0;
         readVarUInt(header.map_key_stride, istr);
+        readVarUInt(header.map_chunk_window, istr);
     }
 
     return header;
@@ -1740,7 +1747,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         postings_serialization,
         positions_stream);
 
-    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, params.map_element_granule, map_key_stride, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, params.map_element_granule, map_key_stride, map_chunk_window, index_stream->compressed_hashing);
 }
 
 void MergeTreeIndexGranuleTextWritable::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
@@ -2035,7 +2042,8 @@ std::unique_ptr<MergeTreeIndexGranuleTextWritable> MergeTreeIndexTextGranuleBuil
         std::move(position_map),
         std::move(sorted_tokens),
         map_stride,
-        map_key_stride);
+        map_key_stride,
+        map_chunk_window);
 }
 
 void MergeTreeIndexTextGranuleBuilder::reset()
@@ -2048,6 +2056,7 @@ void MergeTreeIndexTextGranuleBuilder::reset()
     map_row_element_counts.clear();
     map_stride = 0;
     map_key_stride = 0;
+    map_chunk_window = 0;
     arena = std::make_unique<Arena>();
 
     if (params.positions)
@@ -2062,13 +2071,15 @@ MergeTreeIndexAggregatorText::MergeTreeIndexAggregatorText(
     TokenizerPtr tokenizer_,
     const IPostingListCodec * posting_list_codec_,
     MergeTreeIndexTextPreprocessorPtr preprocessor_,
-    MergeTreeIndexTextPostprocessorPtr postprocessor_)
+    MergeTreeIndexTextPostprocessorPtr postprocessor_,
+    size_t map_chunk_window_arg)
     : index_column_name(std::move(index_column_name_))
     , params(std::move(params_))
     , tokenizer(tokenizer_)
     , granule_builder(params, tokenizer_, posting_list_codec_)
     , preprocessor(preprocessor_)
     , postprocessor(postprocessor_)
+    , map_chunk_window_(map_chunk_window_arg)
 {
 }
 
@@ -2236,13 +2247,24 @@ void MergeTreeIndexAggregatorText::addMapGranuleDocuments(
     const IColumn & keys = tuple.getColumn(0);
     const IColumn & values = tuple.getColumn(1);
 
-    /// Open exactly one new chunk bucket per `update()` call. Each call corresponds to exactly one
-    /// write-granule (mark), so `chunk_ordinal == mark_ordinal` on both build and read sides.
-    map_granule_entries.emplace_back();
-    auto & granule = map_granule_entries.back();
+    /// Each row is assigned to a chunk bucket by its ABSOLUTE row number: chunk = abs_row / W,
+    /// where W = map_chunk_window_ (the `index_granularity` setting at index creation time,
+    /// persisted in the header). This is independent of `update` call cadence and block boundaries,
+    /// so multiple `update` calls covering the same mark's row range all land in the same bucket.
+    const size_t W = map_chunk_window_;
 
-    for (size_t row = start_row; row < start_row + rows_read; ++row)
+    for (size_t local = 0; local < rows_read; ++local)
     {
+        const size_t abs_row = cumulative_rows + local;
+        const size_t chunk = (W > 0) ? (abs_row / W) : abs_row;
+
+        /// Grow the vector on demand; later calls with the same chunk merge into the existing entry.
+        if (chunk >= map_granule_entries.size())
+            map_granule_entries.resize(chunk + 1);
+
+        auto & granule = map_granule_entries[chunk];
+
+        const size_t row = start_row + local;
         /// ColumnArray::Offsets guarantees offsets[-1] == 0, so row == 0 is fine.
         const size_t row_begin = offsets[row - 1];
         const size_t row_end = offsets[row];
@@ -2252,7 +2274,7 @@ void MergeTreeIndexAggregatorText::addMapGranuleDocuments(
             String key{keys.getDataAt(e)};
             String value{values.getDataAt(e)};
 
-            /// Find-or-add the key in this granule (small K; linear scan is fine), dedup values.
+            /// Find-or-add the key in this chunk (small K; linear scan is fine), dedup values.
             auto it = std::find_if(granule.begin(), granule.end(), [&](const auto & kv) { return kv.first == key; });
             if (it == granule.end())
                 granule.push_back({key, {value}});
@@ -2260,18 +2282,22 @@ void MergeTreeIndexAggregatorText::addMapGranuleDocuments(
                 it->second.push_back(value);
         }
     }
+
+    cumulative_rows += rows_read;
 }
 
 void MergeTreeIndexAggregatorText::assignGranuleKeySlots()
 {
     const MapGranuleSlots slots = computeMapGranuleSlots(map_granule_entries);
     granule_builder.map_key_stride = slots.stride;
+    granule_builder.map_chunk_window = map_chunk_window_;
 
     for (const auto & [token, ids] : slots.postings)
         for (UInt32 kid : ids)
             granule_builder.addTokenSlot(token, kid);
 
     map_granule_entries.clear();
+    cumulative_rows = 0;
 }
 
 MergeTreeIndexText::MergeTreeIndexText(
@@ -2279,13 +2305,15 @@ MergeTreeIndexText::MergeTreeIndexText(
     const IndexDescription & index_,
     MergeTreeIndexTextParams params_,
     std::unique_ptr<ITokenizer> tokenizer_,
-    std::unique_ptr<IPostingListCodec> posting_list_codec_)
+    std::unique_ptr<IPostingListCodec> posting_list_codec_,
+    size_t map_chunk_window_arg)
     : IMergeTreeIndex(std::move(metadata_snapshot_), index_)
     , params(std::move(params_))
     , tokenizer(std::move(tokenizer_))
     , posting_list_codec(std::move(posting_list_codec_))
     , preprocessor(std::make_shared<MergeTreeIndexTextPreprocessor>(params.preprocessor, index_))
     , postprocessor(std::make_shared<MergeTreeIndexTextPostprocessor>(params.postprocessor, index_))
+    , map_chunk_window(map_chunk_window_arg)
 {
 }
 
@@ -2336,7 +2364,7 @@ MergeTreeIndexGranulePtr MergeTreeIndexText::createIndexGranule() const
 
 MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 {
-    return std::make_shared<MergeTreeIndexAggregatorText>(index.column_names[0], params, tokenizer.get(), posting_list_codec.get(), preprocessor, postprocessor);
+    return std::make_shared<MergeTreeIndexAggregatorText>(index.column_names[0], params, tokenizer.get(), posting_list_codec.get(), preprocessor, postprocessor, map_chunk_window);
 }
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
@@ -2501,7 +2529,12 @@ MergeTreeIndexPtr textIndexCreator(StorageMetadataPtr metadata_snapshot, const I
     if (!options.empty())
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unexpected text index arguments: {}", fmt::join(std::views::keys(options), ", "));
 
-    return std::make_shared<MergeTreeIndexText>(std::move(metadata_snapshot), index, index_params, std::move(tokenizer), std::move(posting_list_codec));
+    /// In `map_element_granule` mode, the row-window size W = `index_granularity` (the setting at
+    /// index creation time) is persisted in the header so reads can reconstruct chunk boundaries
+    /// even when the setting is later changed.
+    const size_t map_chunk_window = map_element_granule ? static_cast<size_t>(settings[MergeTreeSetting::index_granularity]) : 0;
+
+    return std::make_shared<MergeTreeIndexText>(std::move(metadata_snapshot), index, index_params, std::move(tokenizer), std::move(posting_list_codec), map_chunk_window);
 }
 
 void textIndexValidator(const IndexDescription & index, bool /*attach*/, const MergeTreeSettings & settings)

@@ -161,6 +161,11 @@ private:
     /// merged part's stride (= max of source strides). eid = row*S + slot.
     std::vector<UInt64> source_map_stride;
     UInt64 merged_map_stride = 1;
+    /// map_element_granule mode: the granule index is rebuilt from the merged Map column into a
+    /// single source segment, so its key stride `R` and row-window `W` are read from that segment's
+    /// header and preserved verbatim in the merged header. kid = chunk*R + slot; chunk = abs_row / W.
+    UInt64 merged_map_key_stride = 0;
+    UInt64 merged_map_chunk_window = 0;
     /// map_element FINAL merge: re-assign slots freq-positionally (compaction) instead of the
     /// streaming slot-preserving remap.
     bool rerank = false;
