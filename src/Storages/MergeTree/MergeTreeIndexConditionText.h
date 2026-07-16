@@ -77,7 +77,8 @@ public:
         TokenizerPtr tokenizer_,
         MergeTreeIndexTextPreprocessorPtr preprocessor_,
         MergeTreeIndexTextPostprocessorPtr postprocessor_,
-        bool has_positions_);
+        bool has_positions_,
+        bool map_element_);
 
     ~MergeTreeIndexConditionText() override = default;
     static bool isSupportedFunction(const String & function_name);
@@ -121,6 +122,8 @@ private:
             FUNCTION_HAS_ANY_TOKENS,
             FUNCTION_HAS_ALL_TOKENS,
             FUNCTION_HAS_PHRASE,
+            /// `m[key] = value` on a map-element index: intersect key/value postings in element space.
+            FUNCTION_MAP_KEY_VALUE_EQUALS,
             FUNCTION_LIKE,
             /// Can take any value
             FUNCTION_UNKNOWN,
@@ -195,6 +198,8 @@ private:
     bool has_postprocessor;
     /// Whether the index has position data for phrase queries.
     bool has_positions = false;
+    /// Whether the index is built over a Map column in element mode (see MergeTreeIndexTextParams).
+    bool map_element = false;
     /// Cache for tokens and their infos (cardinality, etc.)
     TextIndexTokensCachePtr tokens_cache;
     /// Cache for headers of the text index

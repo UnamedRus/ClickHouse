@@ -219,13 +219,6 @@ static PostingsSerialization createPostingsSerialization(const IMergeTreeIndex &
     return PostingsSerialization(std::move(codec_copy), static_cast<MergeTreeIndexVersion>(TextIndexHeader::Version::WithCodec));
 }
 
-static PostingsSerialization createSourcePostingsSerialization(MergeTreeIndexReaderStream & header_stream)
-{
-    header_stream.seekToStart();
-    /// Only the version and codec are needed here, so skip deserializing the sparse index.
-    auto header = TextIndexSerialization::deserializeHeaderPrefix(*header_stream.getDataBuffer());
-    return PostingsSerialization(PostingListCodecFactory::createPostingListCodec(header.codec_type), header.version);
-}
 
 MergeTextIndexesTask::MergeTextIndexesTask(
     std::vector<TextIndexSegment> segments_,
@@ -234,7 +227,8 @@ MergeTextIndexesTask::MergeTextIndexesTask(
     MergeTreeIndexPtr index_ptr_,
     std::shared_ptr<MergedPartOffsets> merged_part_offsets_,
     const MergeTreeReaderSettings & reader_settings_,
-    const MergeTreeWriterSettings & writer_settings_)
+    const MergeTreeWriterSettings & writer_settings_,
+    bool is_final_)
     : segments(std::move(segments_))
     , new_data_part(std::move(new_data_part_))
     , num_rows(num_rows_)
@@ -250,6 +244,9 @@ MergeTextIndexesTask::MergeTextIndexesTask(
 
     output_tokens = ColumnString::create();
     params = typeid_cast<const MergeTreeIndexText &>(*index_ptr).getParams();
+    /// On a FINAL merge, re-assign map-element slots freq-positionally (compaction) instead of the
+    /// slot-preserving streaming remap.
+    rerank = is_final_ && params.map_element;
     sparse_index_tokens = ColumnString::create();
     sparse_index_offsets = ColumnUInt64::create();
 
@@ -278,14 +275,51 @@ MergeTextIndexesTask::MergeTextIndexesTask(
         }
     }
 
-    /// Resolve each source part's codec from its own header.
+    /// Resolve each source part's codec (and map stride) from its own header.
     source_postings_serializations.reserve(segments.size());
+    source_map_stride.assign(segments.size(), 1);
 
     for (size_t i = 0; i < segments.size(); ++i)
     {
         auto * stream = input_streams[i].at(MergeTreeIndexSubstream::Type::Regular);
-        source_postings_serializations.emplace_back(createSourcePostingsSerialization(*stream));
+        stream->seekToStart();
+        auto header = TextIndexSerialization::deserializeHeaderPrefix(*stream->getDataBuffer());
+        source_postings_serializations.emplace_back(
+            PostingsSerialization(PostingListCodecFactory::createPostingListCodec(header.codec_type), header.version));
+
+        if (params.map_element)
+        {
+            source_map_stride[i] = header.map_stride ? header.map_stride : 1;
+            merged_map_stride = std::max(merged_map_stride, source_map_stride[i]);
+        }
     }
+}
+
+PostingListPtr MergeTextIndexesTask::adjustMapElementPostings(size_t source_num, const PostingList & posting_list) const
+{
+    std::vector<UInt32> ids(posting_list.cardinality());
+    posting_list.toUint32Array(ids.data());
+
+    const size_t part_index = segments[source_num].part_index;
+    const UInt64 s_old = source_map_stride[source_num];
+
+    for (auto & id : ids)
+    {
+        /// element id -> (row, slot) by division; row remapped; slot preserved.
+        const UInt64 old_row = id / s_old;
+        const UInt64 slot = id % s_old;
+        const UInt64 new_row = (*merged_part_offsets)[part_index, old_row];
+        const UInt64 new_id = new_row * merged_map_stride + slot;
+
+        if (new_id > std::numeric_limits<UInt32>::max())
+            throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
+                "Cannot merge map-element text index: remapped element id {} exceeds the maximum supported id {}",
+                new_id, std::numeric_limits<UInt32>::max());
+
+        id = static_cast<UInt32>(new_id);
+    }
+
+    return std::make_shared<PostingList>(ids.size(), ids.data());
 }
 
 MergeTextIndexesTask::~MergeTextIndexesTask() noexcept
@@ -349,6 +383,10 @@ PostingListPtr MergeTextIndexesTask::adjustPartOffsets(size_t source_num, Postin
 {
     if (!merged_part_offsets)
         return posting_list;
+
+    /// map_element postings are element ids, not row ids; they need element-level remap.
+    if (params.map_element)
+        return adjustMapElementPostings(source_num, *posting_list);
 
     std::vector<UInt32> offsets(posting_list->cardinality());
     posting_list->toUint32Array(offsets.data());
@@ -459,6 +497,9 @@ bool MergeTextIndexesTask::isNewToken(const SortCursor & cursor) const
 
 bool MergeTextIndexesTask::executeStep()
 {
+    if (rerank)
+        return executeRerankStep();
+
     if (!is_initialized)
     {
         is_initialized = true;
@@ -555,6 +596,192 @@ bool MergeTextIndexesTask::executeStep()
     return true;
 }
 
+bool MergeTextIndexesTask::executeRerankStep()
+{
+    if (!is_initialized)
+    {
+        is_initialized = true;
+        initializeQueue();
+        if (num_rows != 0)
+        {
+            bool can_use_adaptive_granularity = new_data_part->index_granularity_info.mark_type.adaptive;
+            writeMarks(output_streams, can_use_adaptive_granularity);
+        }
+    }
+
+    if (!queue.isValid())
+    {
+        finalize();
+        return false;
+    }
+
+    /// Phase 1: accumulate every token's merged (row-remapped) postings in dict order.
+    std::vector<std::pair<String, PostingList>> tokens_and_postings;
+    String current_token;
+    PostingList current_postings;
+    bool have_current = false;
+
+    while (queue.isValid())
+    {
+        SortCursor current = queue.current();
+        const auto token_ref = inputs[current->order].tokens->getDataAt(current->getRow());
+        std::string_view token_view{token_ref.data(), token_ref.size()};
+
+        if (!have_current || token_view != std::string_view{current_token})
+        {
+            if (have_current)
+                tokens_and_postings.emplace_back(std::move(current_token), std::move(current_postings));
+            current_token.assign(token_view);
+            current_postings = PostingList{};
+            have_current = true;
+        }
+
+        for (auto & posting : readPostingLists(current->order))
+        {
+            posting = adjustPartOffsets(current->order, posting);
+            current_postings |= *posting;
+        }
+
+        if (!current->isLast())
+        {
+            queue.next();
+        }
+        else
+        {
+            queue.removeTop();
+            readDictionaryBlock(current->order);
+        }
+    }
+    if (have_current)
+        tokens_and_postings.emplace_back(std::move(current_token), std::move(current_postings));
+
+    /// Phase 2: re-assign slots freq-positionally against the merged frequencies.
+    rerankMapElement(tokens_and_postings);
+
+    /// Phase 3: serialize (tokens are already dict-sorted from the merge).
+    for (auto & [token, postings] : tokens_and_postings)
+    {
+        if (output_tokens->size() >= params.dictionary_block_size)
+            flushDictionaryBlock();
+
+        output_tokens->insertData(token.data(), token.size());
+        output_postings = std::move(postings);
+        flushPostingList();
+    }
+
+    finalize();
+    return false;
+}
+
+void MergeTextIndexesTask::rerankMapElement(std::vector<std::pair<String, PostingList>> & tokens_and_postings) const
+{
+    const UInt64 stride = merged_map_stride;
+
+    /// Rank key-tokens (namespace MAP_KEY_NAMESPACE) by merged frequency (posting size); ties by token.
+    std::vector<size_t> key_indices;
+    for (size_t i = 0; i < tokens_and_postings.size(); ++i)
+        if (!tokens_and_postings[i].first.empty() && tokens_and_postings[i].first.front() == MAP_KEY_NAMESPACE)
+            key_indices.push_back(i);
+
+    std::ranges::sort(key_indices, [&](size_t lhs, size_t rhs)
+    {
+        const auto lc = tokens_and_postings[lhs].second.cardinality();
+        const auto rc = tokens_and_postings[rhs].second.cardinality();
+        return lc != rc ? lc > rc : tokens_and_postings[lhs].first < tokens_and_postings[rhs].first;
+    });
+
+    /// element id -> key rank (each entry has exactly one key, so every element id gets a rank).
+    absl::flat_hash_map<UInt32, UInt32> element_key_rank;
+    for (UInt32 rank = 0; rank < key_indices.size(); ++rank)
+    {
+        std::vector<UInt32> ids(tokens_and_postings[key_indices[rank]].second.cardinality());
+        tokens_and_postings[key_indices[rank]].second.toUint32Array(ids.data());
+        for (UInt32 eid : ids)
+            element_key_rank[eid] = rank;
+    }
+
+    /// Group elements by row (eid / stride), then per-row two-pass slot assignment.
+    std::vector<std::pair<UInt32, UInt32>> by_row; /// (row, eid)
+    by_row.reserve(element_key_rank.size());
+    for (const auto & [eid, rank] : element_key_rank)
+        by_row.emplace_back(eid / stride, eid);
+    std::ranges::sort(by_row);
+
+    /// old_eid -> new_eid, only for elements whose slot actually changes (movers).
+    absl::flat_hash_map<UInt32, UInt32> movers;
+    std::vector<char> slot_used(stride, 0);
+    std::vector<UInt32> leftover;
+
+    for (size_t i = 0; i < by_row.size();)
+    {
+        const UInt32 row = by_row[i].first;
+        size_t j = i;
+        std::fill(slot_used.begin(), slot_used.end(), 0);
+        leftover.clear();
+
+        /// pass 1: rank slot if free.
+        for (j = i; j < by_row.size() && by_row[j].first == row; ++j)
+        {
+            const UInt32 eid = by_row[j].second;
+            const UInt32 rank = element_key_rank[eid];
+            if (rank < stride && !slot_used[rank])
+            {
+                slot_used[rank] = 1;
+                const UInt64 new_eid = static_cast<UInt64>(row) * stride + rank;
+                if (new_eid != eid)
+                    movers[eid] = static_cast<UInt32>(new_eid);
+            }
+            else
+            {
+                leftover.push_back(eid);
+            }
+        }
+
+        /// pass 2: leftover -> next free slot.
+        UInt32 free_slot = 0;
+        for (UInt32 eid : leftover)
+        {
+            while (slot_used[free_slot])
+                ++free_slot;
+            slot_used[free_slot] = 1;
+            const UInt64 new_eid = static_cast<UInt64>(row) * stride + free_slot;
+            if (new_eid != eid)
+                movers[eid] = static_cast<UInt32>(new_eid);
+        }
+
+        i = j;
+    }
+
+    if (movers.empty())
+        return;
+
+    /// Rewrite postings: non-movers pass through, movers are remapped. Both the key and value
+    /// element of an entry share the eid, so both get the same new eid -> alignment preserved.
+    std::vector<UInt32> ids;
+    for (auto & [token, postings] : tokens_and_postings)
+    {
+        ids.resize(postings.cardinality());
+        postings.toUint32Array(ids.data());
+
+        bool changed = false;
+        for (UInt32 & id : ids)
+        {
+            auto it = movers.find(id);
+            if (it != movers.end())
+            {
+                id = it->second;
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            std::ranges::sort(ids);
+            postings = PostingList(ids.size(), ids.data());
+        }
+    }
+}
+
 void MergeTextIndexesTask::finalize()
 {
     if (!output_postings.isEmpty())
@@ -566,9 +793,13 @@ void MergeTextIndexesTask::finalize()
     auto * index_stream = output_streams.at(MergeTreeIndexSubstream::Type::Regular);
     DictionarySparseIndex sparse_index(std::move(sparse_index_tokens), std::move(sparse_index_offsets));
 
-    auto serialization_version = static_cast<MergeTreeIndexVersion>(
-        params.positions ? TextIndexHeader::Version::WithPositions : TextIndexHeader::Version::WithCodec);
-    TextIndexSerialization::serializeHeader(sparse_index, postings_serialization.getPostingListCodec()->getType(), serialization_version, params.positions, index_stream->compressed_hashing);
+    auto version_enum = TextIndexHeader::Version::WithCodec;
+    if (params.map_element)
+        version_enum = TextIndexHeader::Version::WithMapElement;
+    else if (params.positions)
+        version_enum = TextIndexHeader::Version::WithPositions;
+    auto serialization_version = static_cast<MergeTreeIndexVersion>(version_enum);
+    TextIndexSerialization::serializeHeader(sparse_index, postings_serialization.getPostingListCodec()->getType(), serialization_version, params.positions, params.map_element, merged_map_stride, index_stream->compressed_hashing);
 
     for (auto & stream : output_streams_holders)
         stream->finalize();

@@ -2,8 +2,10 @@
 #include <Storages/MergeTree/TextIndexAnalyzer.h>
 
 #include <Columns/ColumnArray.h>
+#include <Columns/ColumnMap.h>
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnString.h>
+#include <Columns/ColumnTuple.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/ElapsedTimeProfileEventIncrement.h>
 #include <Common/HashTable/HashSet.h>
@@ -15,6 +17,7 @@
 #include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypeMap.h>
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/IDataType.h>
 #include <DataTypes/Serializations/SerializationNumber.h>
@@ -84,6 +87,7 @@ namespace Setting
 
 static constexpr UInt64 MAX_CARDINALITY_FOR_RAW_POSTINGS = 12;
 static constexpr UInt64 MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS = 6;
+/// MAP_KEY_NAMESPACE / MAP_VALUE_NAMESPACE are defined in MergeTreeIndexText.h (shared with the query condition).
 
 static_assert(MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "MAX_CARDINALITY_FOR_EMBEDDED_POSTINGS must be less or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
 static_assert(PostingListBuilder::max_small_size <= MAX_CARDINALITY_FOR_RAW_POSTINGS, "max_small_size must be less than or equal to MAX_CARDINALITY_FOR_RAW_POSTINGS");
@@ -495,6 +499,7 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
     auto postings_codec = PostingListCodecFactory::createPostingListCodec(text_index_header->codec_type);
     auto postings_serialization = PostingsSerialization(std::move(postings_codec), text_index_header->version);
     serialization_version = text_index_header->version;
+    map_stride = text_index_header->map_stride;
 
     analyzeDictionaryForTokens(text_index_header->sparse_index, postings_serialization, *dictionary_stream, state);
     analyzeDictionaryForPatterns(text_index_header->sparse_index, postings_serialization, *dictionary_stream, state);
@@ -909,6 +914,51 @@ bool MergeTreeIndexGranuleText::hasAllQueryTokensOrEmpty(const TextSearchQuery &
     return true;
 }
 
+bool MergeTreeIndexGranuleText::hasMapEntry(const TextSearchQuery & query) const
+{
+    if (query.tokens.empty())
+        return false;
+
+    const auto & query_builder = analyzer->getQueryBuilder(query);
+
+    /// Proven empty intersection (a token missing, or key/value never co-occur in an entry).
+    if (query_builder.is_failed)
+        return false;
+
+    /// Analysis incomplete: conservatively keep the part.
+    if (query_builder.is_bypassed)
+        return true;
+
+    /// A token absent from the dictionary leaves no rows_range in `All` mode -> no match.
+    if (!query_builder.rows_range.has_value())
+        return false;
+
+    /// Postings not materialized yet: be conservative and keep the mark/part.
+    if (!query_builder.postings.has_value())
+        return true;
+
+    if (query_builder.postings->cardinality() == 0)
+        return false;
+
+    /// Per-mark localization: an element id is `row * map_stride + slot`, so the rows of the current
+    /// mark [begin, end] occupy element ids [begin*S, (end+1)*S - 1]. Intersect that with the
+    /// element-AND result. Without a current range (or stride) this is part-level.
+    if (!current_range.has_value() || map_stride == 0)
+        return true;
+
+    const UInt64 eid_begin = current_range->begin * map_stride;
+    const UInt64 eid_end = (current_range->end + 1) * map_stride - 1;
+    if (eid_begin > std::numeric_limits<UInt32>::max())
+        return false;
+
+    PostingList mark_range;
+    mark_range.addRangeClosed(
+        static_cast<UInt32>(eid_begin),
+        static_cast<UInt32>(std::min<UInt64>(eid_end, std::numeric_limits<UInt32>::max())));
+
+    return mark_range.and_cardinality(*query_builder.postings) > 0;
+}
+
 
 MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     MergeTreeIndexTextParams params_,
@@ -917,7 +967,8 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     std::list<PostingList> && posting_lists_,
     std::unique_ptr<Arena> && arena_,
     std::unique_ptr<TokenToPositionListMap> && position_map_,
-    SortedTokens && sorted_tokens_)
+    SortedTokens && sorted_tokens_,
+    UInt64 map_stride_)
     : params(std::move(params_))
     , posting_list_codec_type(posting_list_codec_type_)
     , tokens_map(std::move(tokens_map_))
@@ -925,6 +976,7 @@ MergeTreeIndexGranuleTextWritable::MergeTreeIndexGranuleTextWritable(
     , arena(std::move(arena_))
     , position_map(std::move(position_map_))
     , sorted_tokens(std::move(sorted_tokens_))
+    , map_stride(map_stride_)
     , logger(getLogger("TextIndexGranuleWriter"))
 {
 }
@@ -1175,7 +1227,7 @@ void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenP
     }
 }
 
-void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, WriteBuffer & ostr)
+void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, WriteBuffer & ostr)
 {
     UInt64 codec_type = static_cast<UInt64>(posting_list_codec_type);
 
@@ -1184,6 +1236,12 @@ void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & spars
 
     if (version >= static_cast<MergeTreeIndexVersion>(TextIndexHeader::Version::WithPositions))
         writeVarUInt(static_cast<UInt64>(has_positions), ostr);
+
+    if (version >= static_cast<MergeTreeIndexVersion>(TextIndexHeader::Version::WithMapElement))
+    {
+        writeVarUInt(static_cast<UInt64>(map_element), ostr);
+        writeVarUInt(map_stride, ostr);
+    }
 
     /// Sparse indexes are created with raw columns and bit-packed only by optimize.
     /// The write path never calls optimize, so expect the raw columns here.
@@ -1204,7 +1262,7 @@ TextIndexHeader TextIndexSerialization::deserializeHeaderPrefix(ReadBuffer & ist
     UInt64 version = 0;
     readVarUInt(version, istr);
 
-    if (version > static_cast<UInt64>(TextIndexHeader::Version::WithPositions))
+    if (version > static_cast<UInt64>(TextIndexHeader::Version::WithMapElement))
         throw Exception(ErrorCodes::CORRUPTED_DATA, "Unsupported version of sparse index ({})", version);
 
     TextIndexHeader header;
@@ -1226,6 +1284,14 @@ TextIndexHeader TextIndexSerialization::deserializeHeaderPrefix(ReadBuffer & ist
         UInt64 has_positions = 0;
         readVarUInt(has_positions, istr);
         header.has_positions = has_positions != 0;
+    }
+
+    if (version >= static_cast<UInt64>(TextIndexHeader::Version::WithMapElement))
+    {
+        UInt64 map_element = 0;
+        readVarUInt(map_element, istr);
+        header.map_element = map_element != 0;
+        readVarUInt(header.map_stride, istr);
     }
 
     return header;
@@ -1524,9 +1590,13 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         positions_stream = it->second;
     }
 
-    /// Positional parts need a WithPositions reader.
-    auto serialization_version = static_cast<MergeTreeIndexVersion>(
-        params.positions ? TextIndexHeader::Version::WithPositions : TextIndexHeader::Version::WithCodec);
+    /// Map-element parts need a WithMapElement reader; positional parts need a WithPositions reader.
+    auto version_enum = TextIndexHeader::Version::WithCodec;
+    if (params.map_element)
+        version_enum = TextIndexHeader::Version::WithMapElement;
+    else if (params.positions)
+        version_enum = TextIndexHeader::Version::WithPositions;
+    auto serialization_version = static_cast<MergeTreeIndexVersion>(version_enum);
 
     auto postings_codec = PostingListCodecFactory::createPostingListCodec(posting_list_codec_type);
     PostingsSerialization postings_serialization(std::move(postings_codec), serialization_version);
@@ -1539,7 +1609,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         postings_serialization,
         positions_stream);
 
-    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, index_stream->compressed_hashing);
 }
 
 void MergeTreeIndexGranuleTextWritable::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
@@ -1634,6 +1704,21 @@ void MergeTreeIndexTextGranuleBuilder::addDocument(std::string_view document)
         });
 }
 
+void MergeTreeIndexTextGranuleBuilder::addMapEntry(std::string_view key, std::string_view value)
+{
+    /// Both tokens are inserted at the same `current_row` (the entry's element id); the caller
+    /// advances the element id once per entry via incrementCurrentRow.
+    namespaced_token_buffer.clear();
+    namespaced_token_buffer.push_back(MAP_KEY_NAMESPACE);
+    namespaced_token_buffer.append(key.data(), key.size());
+    addToken(namespaced_token_buffer, 0);
+
+    namespaced_token_buffer.clear();
+    namespaced_token_buffer.push_back(MAP_VALUE_NAMESPACE);
+    namespaced_token_buffer.append(value.data(), value.size());
+    addToken(namespaced_token_buffer, 0);
+}
+
 void MergeTreeIndexTextGranuleBuilder::addToken(std::string_view token, UInt32 token_position)
 {
     bool inserted = false;
@@ -1661,8 +1746,117 @@ void MergeTreeIndexTextGranuleBuilder::incrementCurrentRow()
     ++current_row;
 }
 
+void MergeTreeIndexTextGranuleBuilder::reassignMapElementIds()
+{
+    /// Dump-time reassign (map_element mode): postings currently hold provisional dense element ids
+    /// (row-major running counter). Recompute them as row*S + slot with a fixed per-row stride
+    /// S = max row arity, so element -> row is `eid / S` (no per-row table on disk). The slot is
+    /// frequency-positional: within a row, a key ranked r (by global key frequency) takes slot r if
+    /// r < S and free, else the next free slot. The whole part is in RAM here, so this is a local
+    /// rebuild via the normal add() path.
+    std::vector<UInt64> cum(map_row_element_counts.size() + 1, 0);
+    UInt64 stride = 0;
+    for (size_t r = 0; r < map_row_element_counts.size(); ++r)
+    {
+        cum[r + 1] = cum[r] + map_row_element_counts[r];
+        stride = std::max(stride, map_row_element_counts[r]);
+    }
+    map_stride = std::max<UInt64>(stride, 1);
+    const size_t total_elements = cum.back();
+
+    /// Rank keys by frequency (key-token posting size), ties broken by token for determinism.
+    std::vector<std::pair<std::string_view, size_t>> key_tokens;
+    tokens_map.forEachValue([&](const auto & key, const PostingListBuilder & builder)
+    {
+        if (!key.empty() && key.front() == MAP_KEY_NAMESPACE)
+            key_tokens.emplace_back(std::string_view{key}, builder.size());
+    });
+    std::ranges::sort(key_tokens, [](const auto & lhs, const auto & rhs)
+    {
+        return lhs.second != rhs.second ? lhs.second > rhs.second : lhs.first < rhs.first;
+    });
+
+    /// element -> key rank (every entry has exactly one key, so every element id gets a rank).
+    std::vector<UInt32> element_key_rank(total_elements, std::numeric_limits<UInt32>::max());
+    for (UInt32 rank = 0; rank < key_tokens.size(); ++rank)
+    {
+        auto it = tokens_map.find(key_tokens[rank].first);
+        it->getMapped().forEachValue([&](UInt32 e) { element_key_rank[e] = rank; });
+    }
+
+    /// Per-row two-pass slot assignment: rank slot if free, else next free slot (leftover).
+    std::vector<UInt32> element_slot(total_elements, 0);
+    std::vector<char> slot_used(map_stride, 0);
+    std::vector<UInt32> leftover;
+    for (size_t row = 0; row + 1 < cum.size(); ++row)
+    {
+        std::fill(slot_used.begin(), slot_used.end(), 0);
+        leftover.clear();
+        for (UInt64 e = cum[row]; e < cum[row + 1]; ++e)
+        {
+            const UInt32 rank = element_key_rank[e];
+            if (rank < map_stride && !slot_used[rank])
+            {
+                element_slot[e] = rank;
+                slot_used[rank] = 1;
+            }
+            else
+            {
+                leftover.push_back(static_cast<UInt32>(e));
+            }
+        }
+        UInt32 free_slot = 0;
+        for (UInt32 e : leftover)
+        {
+            while (slot_used[free_slot])
+                ++free_slot;
+            element_slot[e] = free_slot;
+            slot_used[free_slot] = 1;
+        }
+    }
+
+    /// Rewrite every token's postings with new eids. Slots != positions, so a token's new eids can
+    /// be out of provisional order within a row -> sort each token's new eids before re-adding.
+    TokenToPostingsBuilderMap fresh_map;
+    std::list<PostingList> fresh_lists;
+    auto fresh_arena = std::make_unique<Arena>();
+    std::vector<UInt32> new_eids;
+
+    tokens_map.forEachValue([&](const auto & key, const PostingListBuilder & old_builder)
+    {
+        new_eids.clear();
+        old_builder.forEachValue([&](UInt32 provisional)
+        {
+            const size_t row = std::upper_bound(cum.begin(), cum.end(), static_cast<UInt64>(provisional)) - cum.begin() - 1;
+            const UInt64 new_eid = row * map_stride + element_slot[provisional];
+            if (new_eid > std::numeric_limits<UInt32>::max())
+                throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
+                    "Cannot build map-element text index: element id {} (rows * stride {}) exceeds the maximum supported id {}",
+                    new_eid, map_stride, std::numeric_limits<UInt32>::max());
+            new_eids.push_back(static_cast<UInt32>(new_eid));
+        });
+
+        std::ranges::sort(new_eids);
+
+        bool inserted = false;
+        TokenToPostingsBuilderMap::LookupResult it;
+        ArenaKeyHolder key_holder(key, *fresh_arena);
+        fresh_map.emplace(key_holder, it, inserted);
+        PostingListBuilder & new_builder = it->getMapped();
+        for (UInt32 v : new_eids)
+            new_builder.add(v, fresh_lists);
+    });
+
+    tokens_map = std::move(fresh_map);
+    posting_lists = std::move(fresh_lists);
+    arena = std::move(fresh_arena);
+}
+
 std::unique_ptr<MergeTreeIndexGranuleTextWritable> MergeTreeIndexTextGranuleBuilder::build()
 {
+    if (params.map_element)
+        reassignMapElementIds();
+
     SortedTokens sorted_tokens;
     sorted_tokens.reserve(tokens_map.size());
 
@@ -1693,7 +1887,8 @@ std::unique_ptr<MergeTreeIndexGranuleTextWritable> MergeTreeIndexTextGranuleBuil
         std::move(posting_lists),
         std::move(arena),
         std::move(position_map),
-        std::move(sorted_tokens));
+        std::move(sorted_tokens),
+        map_stride);
 }
 
 void MergeTreeIndexTextGranuleBuilder::reset()
@@ -1703,6 +1898,8 @@ void MergeTreeIndexTextGranuleBuilder::reset()
     num_processed_tokens = 0;
     tokens_map = {};
     posting_lists.clear();
+    map_row_element_counts.clear();
+    map_stride = 0;
     arena = std::make_unique<Arena>();
 
     if (params.positions)
@@ -1741,6 +1938,19 @@ void MergeTreeIndexAggregatorText::update(const Block & block, size_t * pos, siz
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "The provided position is not less than the number of block rows. Position: {}, Block rows: {}",
             *pos, block.rows());
+    }
+
+    if (params.map_element)
+    {
+        const size_t rows_read = std::min(limit, block.rows() - *pos);
+        if (rows_read == 0)
+            return;
+
+        /// Map entries are indexed as whole key/value tokens, bypassing the tokenizer/preprocessor.
+        const auto & index_column = block.getByName(index_column_name);
+        addMapDocuments(index_column.column, *pos, rows_read);
+        *pos += rows_read;
+        return;
     }
 
     if (granule_builder.current_row + limit > std::numeric_limits<UInt32>::max())
@@ -1818,6 +2028,40 @@ void MergeTreeIndexAggregatorText::addDocumentsFromArray(ColumnPtr column, size_
     }
 }
 
+void MergeTreeIndexAggregatorText::addMapDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read)
+{
+    const auto full_column = column->convertToFullColumnIfConst();
+    const auto & column_map = assert_cast<const ColumnMap &>(*full_column);
+    const auto & column_array = column_map.getNestedColumn();
+    const IColumn::Offsets & offsets = column_array.getOffsets();
+    const auto & tuple = column_map.getNestedData();
+    const IColumn & keys = tuple.getColumn(0);
+    const IColumn & values = tuple.getColumn(1);
+
+    for (size_t row = start_row; row < start_row + rows_read; ++row)
+    {
+        /// ColumnArray::Offsets guarantees offsets[-1] == 0, so start_row == 0 is fine.
+        const size_t row_begin = offsets[row - 1];
+        const size_t row_end = offsets[row];
+
+        for (size_t element_idx = row_begin; element_idx < row_end; ++element_idx)
+        {
+            /// current_row is the element id in map_element mode; it must stay within UInt32.
+            if (granule_builder.current_row >= std::numeric_limits<UInt32>::max())
+                throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
+                    "Cannot build text index: the map column has more than {} entries in a part. "
+                    "Materialization of a map-element text index is not supported for parts with more entries.",
+                    std::numeric_limits<UInt32>::max());
+
+            granule_builder.addMapEntry(keys.getDataAt(element_idx), values.getDataAt(element_idx));
+            granule_builder.incrementCurrentRow();
+        }
+
+        /// One entry per row (including empty maps), for the per-row element-count table.
+        granule_builder.recordMapRow(row_end - row_begin);
+    }
+}
+
 MergeTreeIndexText::MergeTreeIndexText(
     StorageMetadataPtr metadata_snapshot_,
     const IndexDescription & index_,
@@ -1885,7 +2129,7 @@ MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
 {
-    return std::make_shared<MergeTreeIndexConditionText>(predicate, context, index.sample_block, tokenizer.get(), preprocessor, postprocessor, params.positions);
+    return std::make_shared<MergeTreeIndexConditionText>(predicate, context, index.sample_block, tokenizer.get(), preprocessor, postprocessor, params.positions, params.map_element);
 }
 
 DataTypePtr MergeTreeIndexText::getNestedDataType(const DataTypePtr & data_type)
@@ -2019,11 +2263,15 @@ MergeTreeIndexPtr textIndexCreator(StorageMetadataPtr metadata_snapshot, const I
 
     UInt64 positions = extractFieldOption<UInt64>(options, ARGUMENT_POSITIONS).value_or(DEFAULT_POSITIONS);
 
+    /// A text index defined directly on a Map column is built in element mode (see MergeTreeIndexTextParams).
+    bool map_element = !index.data_types.empty() && WhichDataType(index.data_types[0]).isMap();
+
     MergeTreeIndexTextParams index_params{
         dictionary_block_size,
         dictionary_block_frontcoding_compression,
         posting_list_block_size,
         positions,
+        map_element,
         std::move(preprocessor_ast),
         std::move(postprocessor_ast)};
 
@@ -2085,14 +2333,34 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/, const M
         throw Exception(ErrorCodes::INCORRECT_NUMBER_OF_COLUMNS, "Text index must be created on a single column");
 
     DataTypePtr index_data_type = index.data_types[0];
-    WhichDataType which_data_type(MergeTreeIndexText::getNestedDataType(index_data_type));
 
-    if (!which_data_type.isString() && !which_data_type.isFixedString())
+    if (WhichDataType(index_data_type).isMap())
     {
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "Text index must be created on columns of type with base type of String or FixedString, got: {}",
-            index_data_type->getName());
+        /// Map-element mode: index whole key/value tokens, so both must have a String/FixedString base type.
+        const auto & map_type = assert_cast<const DataTypeMap &>(*index_data_type);
+        WhichDataType key_type(MergeTreeIndexText::getNestedDataType(map_type.getKeyType()));
+        WhichDataType value_type(MergeTreeIndexText::getNestedDataType(map_type.getValueType()));
+
+        if ((!key_type.isString() && !key_type.isFixedString())
+            || (!value_type.isString() && !value_type.isFixedString()))
+        {
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "Text index on a Map column requires String or FixedString keys and values, got: {}",
+                index_data_type->getName());
+        }
+    }
+    else
+    {
+        WhichDataType which_data_type(MergeTreeIndexText::getNestedDataType(index_data_type));
+
+        if (!which_data_type.isString() && !which_data_type.isFixedString())
+        {
+            throw Exception(
+                ErrorCodes::BAD_ARGUMENTS,
+                "Text index must be created on columns of type with base type of String or FixedString, got: {}",
+                index_data_type->getName());
+        }
     }
 
     /// Create the preprocessor for validation.

@@ -77,12 +77,23 @@ namespace DB
 
 using PostingListCodecPtr = std::unique_ptr<IPostingListCodec>;
 
+/// Namespace prefix bytes used in `map_element` mode to separate key tokens from value tokens
+/// within a single dictionary. The prefix is the first byte of every token, so the key/value
+/// spaces never collide regardless of the key/value content. Shared by the writer and the query
+/// condition so they build identical tokens.
+static constexpr char MAP_KEY_NAMESPACE = '\x01';
+static constexpr char MAP_VALUE_NAMESPACE = '\x02';
+
 struct MergeTreeIndexTextParams
 {
     size_t dictionary_block_size = 0;
     size_t dictionary_block_frontcoding_compression = 1;
     size_t posting_list_block_size = 1024 * 1024;
     size_t positions = 0;
+    /// When set, the index is built over a `Map` column: every map entry (key, value) gets a
+    /// shared element id and both the (namespaced) key token and value token are indexed under it,
+    /// so `m[k] = v` can be resolved by intersecting the key and value posting lists.
+    bool map_element = false;
     ASTPtr preprocessor;
     ASTPtr postprocessor;
 };
@@ -115,6 +126,23 @@ public:
     bool isEmpty() const { return size() == 0; }
     bool isSmall() const { return small_size < max_small_size; }
     bool isLarge() const { return !isSmall(); }
+
+    /// Iterates the posting values in ascending order (read-only). Used by the map_element dump
+    /// reassign to rebuild postings with recomputed element ids.
+    template <typename F>
+    void forEachValue(F && f) const
+    {
+        if (isSmall())
+        {
+            for (UInt8 i = 0; i < small_size; ++i)
+                f(small[i]);
+        }
+        else
+        {
+            for (UInt32 value : *large.postings)
+                f(value);
+        }
+    }
 
     UInt32 minimum() const
     {
@@ -290,12 +318,17 @@ struct TextIndexHeader
         Initial = 0,
         WithCodec = 1,
         WithPositions = 2,
+        WithMapElement = 3,
     };
 
     MergeTreeIndexVersion version = static_cast<MergeTreeIndexVersion>(Version::Initial);
     IPostingListCodec::Type codec_type = IPostingListCodec::Type::None;
     /// Persisted for version >= WithPositions.
     bool has_positions = false;
+    /// Persisted for version >= WithMapElement. Postings are element ids over map entries.
+    bool map_element = false;
+    /// Persisted for version >= WithMapElement. Fixed per-row stride: eid = row * map_stride + slot.
+    UInt64 map_stride = 0;
     DictionarySparseIndex sparse_index;
 };
 
@@ -315,7 +348,7 @@ struct TextIndexSerialization
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
     static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);
-    static void serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, WriteBuffer & ostr);
+    static void serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, WriteBuffer & ostr);
 
     static TextIndexHeader deserializeHeader(ReadBuffer & istr);
     /// Reads only the version and posting list codec from the start of the header, without the
@@ -368,6 +401,12 @@ public:
     bool hasAllQueryTokens(const TextSearchQuery & query) const;
     bool hasAllQueryTokensOrEmpty(const TextSearchQuery & query) const;
 
+    /// Map-element mode: postings are element ids over map entries, so the query tokens
+    /// {namespaced key, namespaced value} are intersected in element space. Returns true when the
+    /// intersection is non-empty, i.e. the part contains an entry `key = value`. current_range is
+    /// intentionally ignored (element ids are not row ids); this yields part-level pruning.
+    bool hasMapEntry(const TextSearchQuery & query) const;
+
     const TextIndexAnalyzer & getAnalyzer() const { return *analyzer; }
 
     void setCurrentRange(RowsRange range) { current_range = std::move(range); }
@@ -411,6 +450,9 @@ private:
     IPostingListCodec::Type postings_codec_type = IPostingListCodec::Type::None;
     /// On-disk serialization version of the text index header.
     MergeTreeIndexVersion serialization_version = static_cast<MergeTreeIndexVersion>(TextIndexHeader::Version::Initial);
+    /// Fixed per-row stride (map_element mode): element id = row * map_stride + slot. Used to map
+    /// matching element ids back to rows for per-mark localization.
+    UInt64 map_stride = 0;
 };
 
 /// Text index granule created on writing of the index.
@@ -425,7 +467,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
         std::list<PostingList> && posting_lists_,
         std::unique_ptr<Arena> && arena_,
         std::unique_ptr<TokenToPositionListMap> && position_map_,
-        SortedTokens && sorted_tokens_);
+        SortedTokens && sorted_tokens_,
+        UInt64 map_stride_);
 
     ~MergeTreeIndexGranuleTextWritable() override = default;
 
@@ -446,6 +489,8 @@ struct MergeTreeIndexGranuleTextWritable : public IMergeTreeIndexGranule
     std::unique_ptr<TokenToPositionListMap> position_map;
     /// Sorted view of tokens with their posting/position builders (non-owning; references the fields above).
     SortedTokens sorted_tokens;
+    /// Fixed per-row stride S (map_element mode); serialized in the header. eid = row*S + slot.
+    UInt64 map_stride = 0;
     LoggerPtr logger;
 };
 
@@ -463,11 +508,19 @@ struct MergeTreeIndexTextGranuleBuilder
     void addDocument(std::string_view document);
     // Adds a document to the granule. The document is inserted directly as a single token.
     void addToken(std::string_view token, UInt32 token_position);
+    /// Adds one map entry (key, value) at the current element id: the namespaced key token and
+    /// value token are both inserted under `current_row`, so they share the entry's element id.
+    void addMapEntry(std::string_view key, std::string_view value);
 
     void incrementCurrentRow();
     void setCurrentRow(size_t row) { current_row = row; }
+    /// Records the number of map entries in one row (map_element mode); builds the per-row table
+    /// used for element-id <-> row translation on merge and query.
+    void recordMapRow(UInt64 element_count) { map_row_element_counts.push_back(element_count); }
 
     std::unique_ptr<MergeTreeIndexGranuleTextWritable> build();
+    /// Recomputes provisional element ids as row*S + pos (map_element mode); called from build().
+    void reassignMapElementIds();
     bool empty() const { return is_empty; }
     void reset();
 
@@ -487,6 +540,13 @@ struct MergeTreeIndexTextGranuleBuilder
     /// Position data for phrase query support.
     /// Only allocated when params.positions is true.
     std::unique_ptr<TokenToPositionListMap> position_map;
+    /// Reusable scratch buffer for building namespaced map tokens (map_element mode).
+    String namespaced_token_buffer;
+    /// Per-row map entry counts (map_element mode); TRANSIENT (RAM only) — used at build() to
+    /// recompute element ids as row*S + pos, then discarded. Not serialized.
+    std::vector<UInt64> map_row_element_counts;
+    /// Fixed per-row stride computed at build() (= max row arity). Passed to the writable granule.
+    UInt64 map_stride = 0;
 };
 
 class MergeTreeIndexTextPreprocessor;
@@ -517,6 +577,9 @@ private:
     /// Iterates over a ColumnArray(String) slice and calls addDocument<tokenize> on each element.
     template <bool tokenize>
     void addDocumentsFromArray(ColumnPtr column, size_t start_row, size_t rows_read);
+
+    /// Iterates over a ColumnMap slice and indexes each entry's key/value under a shared element id.
+    void addMapDocuments(const ColumnPtr & column, size_t start_row, size_t rows_read);
 
     String index_column_name;
     MergeTreeIndexTextParams params;

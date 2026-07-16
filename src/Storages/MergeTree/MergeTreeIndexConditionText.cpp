@@ -120,7 +120,8 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
     TokenizerPtr tokenizer_,
     MergeTreeIndexTextPreprocessorPtr preprocessor_,
     MergeTreeIndexTextPostprocessorPtr postprocessor_,
-    bool has_positions_)
+    bool has_positions_,
+    bool map_element_)
     : WithContext(context_)
     , header(index_sample_block)
     , tokenizer(tokenizer_)
@@ -129,6 +130,7 @@ MergeTreeIndexConditionText::MergeTreeIndexConditionText(
     , postprocessor(postprocessor_)
     , has_postprocessor(postprocessor && postprocessor->hasActions())
     , has_positions(has_positions_)
+    , map_element(map_element_)
 {
     if (!predicate)
     {
@@ -201,6 +203,7 @@ bool MergeTreeIndexConditionText::requiresReadingAllTokens(const RPNElement & el
         }
         case RPNElement::FUNCTION_AND:
         case RPNElement::FUNCTION_EQUALS:
+        case RPNElement::FUNCTION_MAP_KEY_VALUE_EQUALS:
         case RPNElement::FUNCTION_LIKE:
         case RPNElement::FUNCTION_HAS_ALL_TOKENS:
         case RPNElement::FUNCTION_HAS_PHRASE:
@@ -343,6 +346,7 @@ bool MergeTreeIndexConditionText::alwaysUnknownOrTrue() const
     return rpnEvaluatesAlwaysUnknownOrTrue(
         rpn,
         {RPNElement::FUNCTION_EQUALS,
+         RPNElement::FUNCTION_MAP_KEY_VALUE_EQUALS,
          RPNElement::FUNCTION_HAS_ANY_TOKENS,
          RPNElement::FUNCTION_HAS_ALL_TOKENS,
          RPNElement::FUNCTION_HAS_PHRASE,
@@ -401,6 +405,13 @@ bool MergeTreeIndexConditionText::mayBeTrueOnGranule(MergeTreeIndexGranulePtr id
             chassert(element.text_search_queries.size() == 1);
             const auto & text_search_query = element.text_search_queries.front();
             bool exists_in_granule = granule->hasAllQueryTokensOrEmpty(*text_search_query);
+            rpn_stack.emplace_back(exists_in_granule, true);
+        }
+        else if (element.function == RPNElement::FUNCTION_MAP_KEY_VALUE_EQUALS)
+        {
+            chassert(element.text_search_queries.size() == 1);
+            const auto & text_search_query = element.text_search_queries.front();
+            bool exists_in_granule = granule->hasMapEntry(*text_search_query);
             rpn_stack.emplace_back(exists_in_granule, true);
         }
         else if (element.function == RPNElement::FUNCTION_HAS_ANY_ELEMENTS)
@@ -785,6 +796,47 @@ bool MergeTreeIndexConditionText::traverseFunctionNode(
 {
     const String function_name = function_node.getFunctionName();
     auto direct_read_mode = getDirectReadMode(function_name);
+
+    /// Map-element index: `m['key'] = 'value'` -> intersect the namespaced key and value postings
+    /// in element space (a hasAllTokens-style query). `m['key']` reaches here either as the map
+    /// subcolumn `m.key_<key>` (default optimization) or as `arrayElement(m, 'key')`.
+    if (map_element && function_name == "equals" && value_field.getType() == Field::Types::String)
+    {
+        String map_column_name;
+        String key_str;
+        bool matched = false;
+
+        if (auto parsed = tryParseMapSubcolumnName(index_column_node.getColumnName()))
+        {
+            map_column_name = parsed->first;
+            key_str = parsed->second;
+            matched = true;
+        }
+        else if (auto array_element = index_column_node.toFunctionNodeOrNull();
+                 array_element && array_element->getFunctionName() == "arrayElement" && array_element->getArgumentsSize() == 2)
+        {
+            Field key_field;
+            DataTypePtr key_type;
+            if (array_element->getArgumentAt(1).tryGetConstant(key_field, key_type) && key_field.getType() == Field::Types::String)
+            {
+                map_column_name = array_element->getArgumentAt(0).getColumnName();
+                key_str = key_field.safeGet<String>();
+                matched = true;
+            }
+        }
+
+        if (matched && header.has(map_column_name))
+        {
+            VectorWithMemoryTracking<String> tokens;
+            tokens.emplace_back(String(1, MAP_KEY_NAMESPACE) + key_str);
+            tokens.emplace_back(String(1, MAP_VALUE_NAMESPACE) + value_field.safeGet<String>());
+
+            out.function = RPNElement::FUNCTION_MAP_KEY_VALUE_EQUALS;
+            out.text_search_queries.emplace_back(std::make_shared<TextSearchQuery>(
+                function_name, TextSearchMode::All, TextIndexDirectReadMode::None, std::move(tokens)));
+            return true;
+        }
+    }
 
     auto index_column_name = index_column_node.getColumnName();
     bool has_index_column = header.has(index_column_name);

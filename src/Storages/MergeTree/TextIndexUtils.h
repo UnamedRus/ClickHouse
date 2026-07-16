@@ -79,7 +79,8 @@ public:
         MergeTreeIndexPtr index_ptr_,
         std::shared_ptr<MergedPartOffsets> merged_part_offsets_,
         const MergeTreeReaderSettings & reader_settings_,
-        const MergeTreeWriterSettings & writer_settings_);
+        const MergeTreeWriterSettings & writer_settings_,
+        bool is_final_);
 
     ~MergeTextIndexesTask() noexcept override;
 
@@ -103,6 +104,17 @@ private:
     std::vector<PostingListPtr> readPostingLists(size_t source_num);
     /// Adjusts row numbers in the postings list according to merged part offsets.
     PostingListPtr adjustPartOffsets(size_t source_num, PostingListPtr posting_list);
+    /// map_element mode: remaps element ids (not row ids) across the merge. Fixed stride makes it
+    /// arithmetic: new_eid = merged_part_offsets[part, e/S_old] * S_new + (e % S_old).
+    PostingListPtr adjustMapElementPostings(size_t source_num, const PostingList & posting_list) const;
+
+    /// map_element FINAL merge: instead of the streaming per-token flush, accumulate all merged
+    /// (row-remapped) postings, re-assign element slots freq-positionally against the merged
+    /// frequencies (compaction), then serialize. Runs in a single step.
+    bool executeRerankStep();
+    /// Re-assigns slots in the accumulated postings by merged key frequency; rewrites (only) the
+    /// element ids that actually change (movers). `tokens_and_postings` is dict-sorted.
+    void rerankMapElement(std::vector<std::pair<String, PostingList>> & tokens_and_postings) const;
 
     void flushPostingList();
     void flushDictionaryBlock();
@@ -144,6 +156,14 @@ private:
     PostingsSerialization postings_serialization;
     /// Per-source deserializers, each using the codec read from that source part's own header.
     std::vector<PostingsSerialization> source_postings_serializations;
+
+    /// map_element mode: fixed per-row stride `S` read from each source part's header, and the
+    /// merged part's stride (= max of source strides). eid = row*S + slot.
+    std::vector<UInt64> source_map_stride;
+    UInt64 merged_map_stride = 1;
+    /// map_element FINAL merge: re-assign slots freq-positionally (compaction) instead of the
+    /// streaming slot-preserving remap.
+    bool rerank = false;
 
     bool is_initialized = false;
 };
