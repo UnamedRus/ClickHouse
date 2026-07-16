@@ -1812,11 +1812,13 @@ MergeTask::VerticalMergeStage::createPipelineForReadingOneColumn(const String & 
         addSkipIndexesExpressionSteps(merge_column_query_plan, indexes_it->second, global_ctx);
     }
 
-    /// If merge may reduce rows, rebuild text indexes and statistics for the resulting part.
+    /// Rebuild text indexes and statistics for the resulting part when merge may reduce rows.
+    /// Granule-mode Map text indexes are also rebuilt here even when rows are not reduced, because
+    /// their per-granule slot postings cannot be remapped from source parts (see addBuildTextIndexesStep).
+    addBuildTextIndexesStep(merge_column_query_plan, *global_ctx->new_data_part, global_ctx);
+
     if (global_ctx->merge_may_reduce_rows)
     {
-        addBuildTextIndexesStep(merge_column_query_plan, *global_ctx->new_data_part, global_ctx);
-
         if (auto transform = addBuildStatisticsStep(merge_column_query_plan, *global_ctx->new_data_part, global_ctx))
             column_build_statistics_transforms.emplace(global_ctx->new_data_part->name, std::move(transform));
     }
@@ -2286,9 +2288,13 @@ bool MergeTask::MergeTextIndexStage::prepare() const
     for (const auto & index : global_ctx->text_indexes_to_merge)
     {
         auto index_ptr = MergeTreeIndexFactory::instance().get(global_ctx->metadata_snapshot, index, *global_ctx->data_settings);
+        bool is_granule_mode = typeid_cast<const MergeTreeIndexText &>(*index_ptr).getParams().map_element_granule;
         std::vector<TextIndexSegment> segments;
 
-        if (global_ctx->merge_may_reduce_rows)
+        /// Granule-mode Map text indexes are rebuilt from the merged Map column (not from per-source
+        /// index data), so their segments are always stored under the new part's name — exactly like
+        /// the merge_may_reduce_rows rebuild path. Regular text indexes use source-part segments.
+        if (global_ctx->merge_may_reduce_rows || is_granule_mode)
         {
             /// Text index was built for the resulting part.
             segments = getTextIndexSegments(global_ctx->new_data_part->name, index.name, 0);
@@ -2314,12 +2320,16 @@ bool MergeTask::MergeTextIndexStage::prepare() const
             }
         }
 
+        /// Granule-mode Map text indexes are rebuilt from the merged column — their postings are
+        /// already in the merged part's coordinate space, so no offset remapping is needed.
+        auto part_offsets_for_task = is_granule_mode ? nullptr : global_ctx->merged_part_offsets;
+
         auto task = std::make_unique<MergeTextIndexesTask>(
             std::move(segments),
             global_ctx->new_data_part,
             global_ctx->rows_written,
             index_ptr,
-            global_ctx->merged_part_offsets,
+            part_offsets_for_task,
             reader_settings,
             global_ctx->to->getWriterSettings(),
             global_ctx->future_part->final);
@@ -2875,9 +2885,24 @@ void MergeTask::addBuildTextIndexesStep(QueryPlan & plan, const IMergeTreeDataPa
 
         auto index_ptr = MergeTreeIndexFactory::instance().get(global_ctx->metadata_snapshot, index, *global_ctx->data_settings);
 
+        bool is_granule_mode = typeid_cast<const MergeTreeIndexText &>(*index_ptr).getParams().map_element_granule;
+        bool is_new_part = (data_part.name == global_ctx->new_data_part->name);
+
+        /// Granule-mode Map text indexes cannot be merged by remapping postings: their slot
+        /// assignments depend on the merged part's granule layout. They must always be rebuilt
+        /// from the merged Map column rather than from each source part's index data.
+        /// Skip granule-mode indexes when processing a source part (they are rebuilt from the
+        /// merged output instead); skip non-granule indexes when processing the new merged part
+        /// in a context where row counts are preserved (they are already handled per source part).
+        if (is_granule_mode && !is_new_part)
+            continue;
+        if (!is_granule_mode && is_new_part && !global_ctx->merge_may_reduce_rows)
+            continue;
+
         /// Rebuild index if merge may reduce rows because we cannot adjust parts offsets in that case.
         /// Build index if it is not materialized in the data part.
-        if (global_ctx->merge_may_reduce_rows || !index_ptr->getDeserializedFormat(data_part.checksums, index_ptr->getFileName(), &data_part.getDataPartStorage()))
+        /// Always rebuild granule-mode Map text indexes (covered by the is_new_part guard above).
+        if (global_ctx->merge_may_reduce_rows || is_granule_mode || !index_ptr->getDeserializedFormat(data_part.checksums, index_ptr->getFileName(), &data_part.getDataPartStorage()))
         {
             description_to_build.push_back(index);
             indexes_to_build.push_back(std::move(index_ptr));
@@ -3228,11 +3253,13 @@ void MergeTask::ExecuteAndFinalizeHorizontalPart::createMergedStream() const
     if (!global_ctx->merging_skip_indexes.empty())
         addSkipIndexesExpressionSteps(merge_parts_query_plan, global_ctx->merging_skip_indexes, global_ctx);
 
-    /// If merge may reduce rows, rebuild text index and statistics for the resulting part.
+    /// Rebuild text indexes and statistics for the resulting part when merge may reduce rows.
+    /// Granule-mode Map text indexes are also rebuilt here even when rows are not reduced, because
+    /// their per-granule slot postings cannot be remapped from source parts (see addBuildTextIndexesStep).
+    addBuildTextIndexesStep(merge_parts_query_plan, *global_ctx->new_data_part, global_ctx);
+
     if (global_ctx->merge_may_reduce_rows)
     {
-        addBuildTextIndexesStep(merge_parts_query_plan, *global_ctx->new_data_part, global_ctx);
-
         if (auto transform = addBuildStatisticsStep(merge_parts_query_plan, *global_ctx->new_data_part, global_ctx))
             ctx->build_statistics_transforms.emplace(global_ctx->new_data_part->name, std::move(transform));
     }
