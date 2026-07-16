@@ -1227,7 +1227,7 @@ void TextIndexSerialization::serializeTokenInfo(WriteBuffer & ostr, const TokenP
     }
 }
 
-void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, WriteBuffer & ostr)
+void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, bool map_element_granule, UInt64 map_key_stride, WriteBuffer & ostr)
 {
     UInt64 codec_type = static_cast<UInt64>(posting_list_codec_type);
 
@@ -1241,6 +1241,12 @@ void TextIndexSerialization::serializeHeader(const DictionarySparseIndex & spars
     {
         writeVarUInt(static_cast<UInt64>(map_element), ostr);
         writeVarUInt(map_stride, ostr);
+    }
+
+    if (version >= static_cast<MergeTreeIndexVersion>(TextIndexHeader::Version::WithMapElementGranule))
+    {
+        writeVarUInt(static_cast<UInt64>(map_element_granule), ostr);
+        writeVarUInt(map_key_stride, ostr);
     }
 
     /// Sparse indexes are created with raw columns and bit-packed only by optimize.
@@ -1262,7 +1268,7 @@ TextIndexHeader TextIndexSerialization::deserializeHeaderPrefix(ReadBuffer & ist
     UInt64 version = 0;
     readVarUInt(version, istr);
 
-    if (version > static_cast<UInt64>(TextIndexHeader::Version::WithMapElement))
+    if (version > static_cast<UInt64>(TextIndexHeader::Version::WithMapElementGranule))
         throw Exception(ErrorCodes::CORRUPTED_DATA, "Unsupported version of sparse index ({})", version);
 
     TextIndexHeader header;
@@ -1292,6 +1298,14 @@ TextIndexHeader TextIndexSerialization::deserializeHeaderPrefix(ReadBuffer & ist
         readVarUInt(map_element, istr);
         header.map_element = map_element != 0;
         readVarUInt(header.map_stride, istr);
+    }
+
+    if (version >= static_cast<UInt64>(TextIndexHeader::Version::WithMapElementGranule))
+    {
+        UInt64 mg = 0;
+        readVarUInt(mg, istr);
+        header.map_element_granule = mg != 0;
+        readVarUInt(header.map_key_stride, istr);
     }
 
     return header;
@@ -1590,9 +1604,12 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         positions_stream = it->second;
     }
 
-    /// Map-element parts need a WithMapElement reader; positional parts need a WithPositions reader.
+    /// Map-element-granule parts need a WithMapElementGranule reader; map-element parts need a WithMapElement reader;
+    /// positional parts need a WithPositions reader.
     auto version_enum = TextIndexHeader::Version::WithCodec;
-    if (params.map_element)
+    if (params.map_element_granule)
+        version_enum = TextIndexHeader::Version::WithMapElementGranule;
+    else if (params.map_element)
         version_enum = TextIndexHeader::Version::WithMapElement;
     else if (params.positions)
         version_enum = TextIndexHeader::Version::WithPositions;
@@ -1609,7 +1626,7 @@ void MergeTreeIndexGranuleTextWritable::serializeBinaryWithMultipleStreams(Merge
         postings_serialization,
         positions_stream);
 
-    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeHeader(sparse_index_block, posting_list_codec_type, serialization_version, params.positions, params.map_element, map_stride, params.map_element_granule, /*map_key_stride=*/0, index_stream->compressed_hashing);
 }
 
 void MergeTreeIndexGranuleTextWritable::deserializeBinary(ReadBuffer &, MergeTreeIndexVersion)
@@ -2157,6 +2174,7 @@ static const String ARGUMENT_DICTIONARY_BLOCK_FRONTCODING_COMPRESSION = "diction
 static const String ARGUMENT_POSTING_LIST_BLOCK_SIZE = "posting_list_block_size";
 static const String ARGUMENT_POSTING_LIST_CODEC = "posting_list_codec";
 static const String ARGUMENT_POSITIONS = "support_phrase_search";
+static const String ARGUMENT_MAP_MODE = "map_mode";
 
 namespace
 {
@@ -2263,8 +2281,13 @@ MergeTreeIndexPtr textIndexCreator(StorageMetadataPtr metadata_snapshot, const I
 
     UInt64 positions = extractFieldOption<UInt64>(options, ARGUMENT_POSITIONS).value_or(DEFAULT_POSITIONS);
 
-    /// A text index defined directly on a Map column is built in element mode (see MergeTreeIndexTextParams).
-    bool map_element = !index.data_types.empty() && WhichDataType(index.data_types[0]).isMap();
+    const bool is_map = !index.data_types.empty() && WhichDataType(index.data_types[0]).isMap();
+
+    /// map_mode: 'element' (default) or 'granule'. Only valid on a Map column.
+    String map_mode = extractFieldOption<String>(options, ARGUMENT_MAP_MODE).value_or("element");
+
+    bool map_element = is_map && map_mode == "element";
+    bool map_element_granule = is_map && map_mode == "granule";
 
     MergeTreeIndexTextParams index_params{
         dictionary_block_size,
@@ -2272,6 +2295,7 @@ MergeTreeIndexPtr textIndexCreator(StorageMetadataPtr metadata_snapshot, const I
         posting_list_block_size,
         positions,
         map_element,
+        map_element_granule,
         std::move(preprocessor_ast),
         std::move(postprocessor_ast)};
 
@@ -2325,6 +2349,11 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/, const M
         .value_or(settings[MergeTreeSetting::text_index_posting_list_codec].toString());
     PostingListCodecFactory::createPostingListCodec(posting_list_codec_name, index.name);
 
+    String map_mode = extractFieldOption<String>(options, ARGUMENT_MAP_MODE).value_or("element");
+
+    if (map_mode != "element" && map_mode != "granule")
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown map_mode '{}' for text index, expected 'element' or 'granule'", map_mode);
+
     if (!options.empty())
         throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unexpected text index arguments: {}", fmt::join(std::views::keys(options), ", "));
 
@@ -2333,6 +2362,9 @@ void textIndexValidator(const IndexDescription & index, bool /*attach*/, const M
         throw Exception(ErrorCodes::INCORRECT_NUMBER_OF_COLUMNS, "Text index must be created on a single column");
 
     DataTypePtr index_data_type = index.data_types[0];
+
+    if (map_mode != "element" && !WhichDataType(index_data_type).isMap())
+        throw Exception(ErrorCodes::BAD_ARGUMENTS, "map_mode is only valid for a text index on a Map column");
 
     if (WhichDataType(index_data_type).isMap())
     {

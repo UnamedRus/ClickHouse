@@ -794,12 +794,14 @@ void MergeTextIndexesTask::finalize()
     DictionarySparseIndex sparse_index(std::move(sparse_index_tokens), std::move(sparse_index_offsets));
 
     auto version_enum = TextIndexHeader::Version::WithCodec;
-    if (params.map_element)
+    if (params.map_element_granule)
+        version_enum = TextIndexHeader::Version::WithMapElementGranule;
+    else if (params.map_element)
         version_enum = TextIndexHeader::Version::WithMapElement;
     else if (params.positions)
         version_enum = TextIndexHeader::Version::WithPositions;
     auto serialization_version = static_cast<MergeTreeIndexVersion>(version_enum);
-    TextIndexSerialization::serializeHeader(sparse_index, postings_serialization.getPostingListCodec()->getType(), serialization_version, params.positions, params.map_element, merged_map_stride, index_stream->compressed_hashing);
+    TextIndexSerialization::serializeHeader(sparse_index, postings_serialization.getPostingListCodec()->getType(), serialization_version, params.positions, params.map_element, merged_map_stride, params.map_element_granule, /*map_key_stride=*/0, index_stream->compressed_hashing);
 
     for (auto & stream : output_streams_holders)
         stream->finalize();

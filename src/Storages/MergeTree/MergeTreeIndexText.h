@@ -94,6 +94,10 @@ struct MergeTreeIndexTextParams
     /// shared element id and both the (namespaced) key token and value token are indexed under it,
     /// so `m[k] = v` can be resolved by intersecting the key and value posting lists.
     bool map_element = false;
+    /// When set, the index is built over a `Map` column in granule mode: each distinct key in an
+    /// index-granule gets one slot, values are assigned their key's slot, and the index prunes on
+    /// exact key/value co-occurrence at granule granularity (no direct read).
+    bool map_element_granule = false;
     ASTPtr preprocessor;
     ASTPtr postprocessor;
 };
@@ -319,6 +323,7 @@ struct TextIndexHeader
         WithCodec = 1,
         WithPositions = 2,
         WithMapElement = 3,
+        WithMapElementGranule = 4,
     };
 
     MergeTreeIndexVersion version = static_cast<MergeTreeIndexVersion>(Version::Initial);
@@ -329,6 +334,10 @@ struct TextIndexHeader
     bool map_element = false;
     /// Persisted for version >= WithMapElement. Fixed per-row stride: eid = row * map_stride + slot.
     UInt64 map_stride = 0;
+    /// Persisted for version >= WithMapElementGranule.
+    bool map_element_granule = false;
+    /// Persisted for version >= WithMapElementGranule. Fixed per-granule slot stride: kid = g*R + slot.
+    UInt64 map_key_stride = 0;
     DictionarySparseIndex sparse_index;
 };
 
@@ -348,7 +357,7 @@ struct TextIndexSerialization
 
     static void serializeTokens(const ColumnString & tokens, WriteBuffer & ostr, TokensFormat format);
     static void serializeTokenInfo(WriteBuffer & ostr, const TokenPostingsInfo & token_info);
-    static void serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, WriteBuffer & ostr);
+    static void serializeHeader(const DictionarySparseIndex & sparse_index, IPostingListCodec::Type posting_list_codec_type, MergeTreeIndexVersion version, bool has_positions, bool map_element, UInt64 map_stride, bool map_element_granule, UInt64 map_key_stride, WriteBuffer & ostr);
 
     static TextIndexHeader deserializeHeader(ReadBuffer & istr);
     /// Reads only the version and posting list codec from the start of the header, without the
