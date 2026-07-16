@@ -86,6 +86,7 @@ CREATE TABLE table
                                 -- Optional parameters:
                                 [, preprocessor = expression(str)]
                                 [, postprocessor = expression(str)]
+                                [, map_mode = 'element' | 'granule' ] -- for Map(K,V) columns
                                 [, support_phrase_search = 0 | 1 ] -- experimental
                                 -- Optional advanced parameters:
                                 [, dictionary_block_size = D]
@@ -905,6 +906,91 @@ SELECT * FROM logs WHERE has(mapValues(attributes), '192.168.1.1'); -- fast
 -- Finds all logs where any attribute includes an error:
 SELECT * FROM logs WHERE mapContainsValueLike(attributes, '% error %'); -- fast
 ```
+
+### Granule-level Map index (`map_mode='granule'`) {#text-index-map-granule-mode}
+
+The `map_mode='granule'` parameter enables a specialized text index layout for `Map(K, V)` columns (where `K` and `V` are `String` or `FixedString`) that prunes at **granule granularity** based on exact key/value co-occurrence.
+
+#### What it is {#text-index-map-granule-mode-what}
+
+With `map_mode='granule'`, the index records which key-value pairs appear together in each MergeTree granule.
+During query execution, a granule is skipped if the index can prove that the requested key-value combination is absent from every row in it.
+The column data is still read for surviving granules; granule-level pruning means ClickHouse does not perform direct reads from the index file to answer the predicate — the index is used exclusively as a skip filter.
+
+**Creating a granule-mode index:**
+
+```sql
+CREATE TABLE logs
+(
+    id        UInt64,
+    timestamp DateTime,
+    attributes Map(String, String),
+    INDEX idx attributes TYPE text(
+        tokenizer = 'splitByNonAlpha',
+        map_mode  = 'granule'
+    ) GRANULARITY 1
+)
+ENGINE = MergeTree
+ORDER BY (timestamp, id)
+SETTINGS index_granularity = 8192;
+```
+
+#### Supported query forms {#text-index-map-granule-mode-queries}
+
+The index activates for the following four predicate forms on a `Map(K, V)` column `m`:
+
+| Predicate | Semantics |
+|---|---|
+| `m['key'] = 'value'` | Exact key/value match |
+| `m['key'] IN ('v1', 'v2', ...)` | Key with any of the listed values |
+| `mapContains(m, 'key')` | Key presence check |
+| `has(mapValues(m), 'value')` | Value presence check (any key) |
+
+```sql
+-- Find logs where the 'level' attribute is 'error':
+SELECT * FROM logs WHERE attributes['level'] = 'error';
+
+-- Find logs where 'level' is 'error' or 'critical':
+SELECT * FROM logs WHERE attributes['level'] IN ('error', 'critical');
+
+-- Find logs that have any 'user_id' attribute:
+SELECT * FROM logs WHERE mapContains(attributes, 'user_id');
+
+-- Find logs that have the value '192.168.1.1' in any attribute:
+SELECT * FROM logs WHERE has(mapValues(attributes), '192.168.1.1');
+```
+
+#### Default-value non-pruning behavior {#text-index-map-granule-mode-default-value}
+
+When a key is absent from a map, the subscript operator `m['key']` returns the default value of the value type (`''` for `String`, a zero-padded string for `FixedString(N)`).
+Because a predicate like `m['key'] = ''` is `TRUE` for both rows where the key is explicitly set to `''` and rows where the key is absent, the granule-mode index **never prunes** granules for comparisons against the default value.
+This is the correct safe behavior: pruning would discard rows that satisfy the predicate through the absence of the key.
+
+```sql
+-- The index does NOT prune this query — '' is the default for absent keys.
+SELECT * FROM logs WHERE attributes['level'] = '';
+
+-- Similarly, an IN list that contains the default value disables pruning for the whole atom.
+SELECT * FROM logs WHERE attributes['level'] IN ('error', '');
+```
+
+#### Size and precision trade-off vs. element mode {#text-index-map-granule-mode-tradeoffs}
+
+| | `map_mode='granule'` | `map_mode='element'` |
+|---|---|---|
+| Index structure | Compact granule-level co-occurrence bitmap | Full inverted index with row-level posting lists |
+| Index size (repetitive keys, 100 k rows) | ~3.7 KB | ~967 KB (~260× larger) |
+| Pruning granularity | Granule (coarser — can skip many granules but not individual rows) | Row (finer — can narrow to exact matching rows) |
+| Direct read support | No (column data is always read for surviving granules) | Yes (`hasAllTokens`, `has`, `mapContainsKey`, etc.) |
+| Best for | Wide maps with many distinct keys, observability workloads, high-cardinality key sets | Small maps, high selectivity queries, workloads that benefit from direct read |
+
+The `granule` mode is the right choice when the map has many distinct keys across the dataset and each query targets a small subset of them, because the index size grows only with the number of granules, not with the number of unique key-value combinations across the entire part.
+
+#### Merging {#text-index-map-granule-mode-merging}
+
+Like other text indexes, the granule-mode index is **rebuilt** (not merged) when data parts are merged.
+The rebuild reads the underlying `Map` column and reconstructs the granule co-occurrence bitmaps for the new merged part.
+If the index is not materialized on a source part, it is built from the column data during the merge.
 
 ### Indexing JSON columns {#text-index-example-json}
 
