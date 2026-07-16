@@ -417,6 +417,15 @@ public:
     /// intentionally ignored (element ids are not row ids); this yields part-level pruning.
     bool hasMapEntry(const TextSearchQuery & query) const;
 
+    /// Map-element-granule mode: postings are slot ids `kid = chunk*R + local_slot`.
+    /// `and_queries` are ANDed together (key + optional single value for equals/key-only/value-only).
+    /// `or_value_queries` are ORed for IN queries (one per value needle in the IN list).
+    /// When current_range is set, the matching slot ids are converted to chunk indices and
+    /// intersected with the chunk range covered by the current row range.
+    bool hasMapEntryGranule(
+        const std::vector<TextSearchQueryPtr> & and_queries,
+        const std::vector<TextSearchQueryPtr> & or_value_queries) const;
+
     const TextIndexAnalyzer & getAnalyzer() const { return *analyzer; }
 
     void setCurrentRange(RowsRange range) { current_range = std::move(range); }
@@ -463,6 +472,12 @@ private:
     /// Fixed per-row stride (map_element mode): element id = row * map_stride + slot. Used to map
     /// matching element ids back to rows for per-mark localization.
     UInt64 map_stride = 0;
+    /// Fixed per-granule key stride (map_element_granule mode): slot id = chunk * R + local_slot,
+    /// where chunk = floor(absolute_row / index_granularity). Loaded from the header.
+    UInt64 map_key_stride = 0;
+    /// Number of rows per index granule (map_element_granule mode). Loaded from the part's
+    /// index_granularity during deserialization; used to map row ranges to chunk indices.
+    UInt64 index_granularity_rows = 0;
 };
 
 /// Text index granule created on writing of the index.

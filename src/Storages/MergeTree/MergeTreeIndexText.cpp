@@ -502,6 +502,11 @@ void MergeTreeIndexGranuleText::deserializeBinaryWithMultipleStreams(MergeTreeIn
     auto postings_serialization = PostingsSerialization(std::move(postings_codec), text_index_header->version);
     serialization_version = text_index_header->version;
     map_stride = text_index_header->map_stride;
+    map_key_stride = text_index_header->map_key_stride;
+    if (text_index_header->map_element_granule && state.part.index_granularity && state.part.index_granularity->getMarksCount() > 1)
+        index_granularity_rows = state.part.index_granularity->getMarkStartingRow(1);
+    else if (text_index_header->map_element_granule && state.part.index_granularity && state.part.index_granularity->getMarksCount() == 1)
+        index_granularity_rows = state.part.rows_count;
 
     analyzeDictionaryForTokens(text_index_header->sparse_index, postings_serialization, *dictionary_stream, state);
     analyzeDictionaryForPatterns(text_index_header->sparse_index, postings_serialization, *dictionary_stream, state);
@@ -959,6 +964,118 @@ bool MergeTreeIndexGranuleText::hasMapEntry(const TextSearchQuery & query) const
         static_cast<UInt32>(std::min<UInt64>(eid_end, std::numeric_limits<UInt32>::max())));
 
     return mark_range.and_cardinality(*query_builder.postings) > 0;
+}
+
+bool MergeTreeIndexGranuleText::hasMapEntryGranule(
+    const std::vector<TextSearchQueryPtr> & and_queries,
+    const std::vector<TextSearchQueryPtr> & or_value_queries) const
+{
+    if (and_queries.empty())
+        return true; /// No constraint -> conservative keep.
+
+    /// Phase 1: AND all queries in and_queries together (intersect posting lists).
+    std::optional<PostingList> and_result;
+
+    for (const auto & query : and_queries)
+    {
+        if (!query || query->tokens.empty())
+            return true; /// No tokens -> cannot prune.
+
+        const auto & qb = analyzer->getQueryBuilder(*query);
+
+        if (qb.is_failed)
+            return false; /// All-mode miss -> proven empty.
+
+        if (qb.is_bypassed)
+            return true; /// Analysis incomplete -> conservative keep.
+
+        if (!qb.postings.has_value())
+            return true; /// Postings not materialized -> conservative keep.
+
+        if (qb.postings->cardinality() == 0)
+            return false; /// No slots -> empty.
+
+        if (!and_result.has_value())
+        {
+            and_result = *qb.postings;
+        }
+        else
+        {
+            *and_result &= *qb.postings;
+        }
+
+        if (and_result->cardinality() == 0)
+            return false;
+    }
+
+    if (!and_result.has_value() || and_result->cardinality() == 0)
+        return false;
+
+    /// Phase 2: OR all value queries (for IN), then AND with the key AND result.
+    if (!or_value_queries.empty())
+    {
+        std::optional<PostingList> or_result;
+
+        for (const auto & query : or_value_queries)
+        {
+            if (!query || query->tokens.empty())
+            {
+                or_result = std::nullopt; /// Empty token = match anything -> cannot prune.
+                break;
+            }
+
+            const auto & qb = analyzer->getQueryBuilder(*query);
+
+            if (qb.is_bypassed)
+            {
+                or_result = std::nullopt; /// Incomplete analysis -> cannot prune.
+                break;
+            }
+
+            if (qb.is_failed)
+                continue; /// This value alternative is empty; skip it.
+
+            if (!qb.postings.has_value())
+            {
+                or_result = std::nullopt; /// Not materialized -> cannot prune.
+                break;
+            }
+
+            if (!or_result.has_value())
+                or_result = *qb.postings;
+            else
+                *or_result |= *qb.postings;
+        }
+
+        if (!or_result.has_value())
+            return true; /// Conservative keep.
+
+        *and_result &= *or_result;
+
+        if (and_result->cardinality() == 0)
+            return false;
+    }
+
+    /// Phase 3: Map slot ids to chunk indices and intersect with the current row range.
+    if (!current_range.has_value() || map_key_stride == 0 || index_granularity_rows == 0)
+        return true; /// Part-level fallback: non-empty posting -> keep.
+
+    const UInt64 row_begin = current_range->begin;
+    const UInt64 row_end = current_range->end;
+
+    /// The chunk range covered by the current row range [row_begin, row_end].
+    const UInt64 chunk_begin = row_begin / index_granularity_rows;
+    const UInt64 chunk_end = row_end / index_granularity_rows;
+
+    /// Check if any slot id in and_result maps to a chunk in [chunk_begin, chunk_end].
+    for (UInt32 kid : *and_result)
+    {
+        const UInt64 chunk = granuleOfSlot(kid, map_key_stride);
+        if (chunk >= chunk_begin && chunk <= chunk_end)
+            return true;
+    }
+
+    return false;
 }
 
 
@@ -2245,7 +2362,7 @@ MergeTreeIndexAggregatorPtr MergeTreeIndexText::createIndexAggregator() const
 
 MergeTreeIndexConditionPtr MergeTreeIndexText::createIndexCondition(const ActionsDAG::Node * predicate, ContextPtr context) const
 {
-    return std::make_shared<MergeTreeIndexConditionText>(predicate, context, index.sample_block, tokenizer.get(), preprocessor, postprocessor, params.positions, params.map_element);
+    return std::make_shared<MergeTreeIndexConditionText>(predicate, context, index.sample_block, tokenizer.get(), preprocessor, postprocessor, params.positions, params.map_element, params.map_element_granule);
 }
 
 DataTypePtr MergeTreeIndexText::getNestedDataType(const DataTypePtr & data_type)

@@ -78,7 +78,8 @@ public:
         MergeTreeIndexTextPreprocessorPtr preprocessor_,
         MergeTreeIndexTextPostprocessorPtr postprocessor_,
         bool has_positions_,
-        bool map_element_);
+        bool map_element_,
+        bool map_element_granule_ = false);
 
     ~MergeTreeIndexConditionText() override = default;
     static bool isSupportedFunction(const String & function_name);
@@ -124,6 +125,12 @@ private:
             FUNCTION_HAS_PHRASE,
             /// `m[key] = value` on a map-element index: intersect key/value postings in element space.
             FUNCTION_MAP_KEY_VALUE_EQUALS,
+            /// `m[k] IN (...)` on a granule map index: key slot AND union of value slots.
+            FUNCTION_MAP_KEY_VALUE_IN,
+            /// `mapContains(m,k)`: key token presence only.
+            FUNCTION_MAP_HAS_KEY,
+            /// `has(mapValues(m),v)`: value token presence only.
+            FUNCTION_MAP_HAS_VALUE,
             FUNCTION_LIKE,
             /// Can take any value
             FUNCTION_UNKNOWN,
@@ -156,6 +163,15 @@ private:
     bool traverseMapElementKeyNode(const RPNBuilderFunctionTreeNode & function_node, RPNElement & out) const;
     bool traverseMapElementValueNode(const RPNBuilderTreeNode & index_column_node, const Field & const_value) const;
     bool traverseJSONSubcolumnKeyNode(const RPNBuilderFunctionTreeNode & function_node, RPNElement & out) const;
+
+    /// Handles key-only and value-only atoms for the `map_element_granule` index:
+    /// `mapContains(m, key)` -> `FUNCTION_MAP_HAS_KEY` and `has(mapValues(m), v)` -> `FUNCTION_MAP_HAS_VALUE`.
+    bool traverseMapGranuleNode(const RPNBuilderFunctionTreeNode & function_node, RPNElement & out) const;
+    /// Handles `m['key'] IN (v1, v2, ...)` for the `map_element_granule` index.
+    bool tryPrepareMapGranuleSetForTextSearch(const RPNBuilderTreeNode & lhs, const RPNBuilderTreeNode & rhs, RPNElement & out) const;
+    /// Extracts (map_column_name, key_str) from an `arrayElement(m, 'key')` or `m.key_<key>` node
+    /// when the map column `m` is in the index header.
+    std::optional<std::pair<String, String>> tryParseMapGranuleArrayElement(const RPNBuilderTreeNode & node) const;
 
     /// Returns true if the node represents `arrayElement(map_col, 'key')`
     /// and there is a text index built on `mapValues(map_col)`.
@@ -200,6 +216,8 @@ private:
     bool has_positions = false;
     /// Whether the index is built over a Map column in element mode (see MergeTreeIndexTextParams).
     bool map_element = false;
+    /// Whether the index is built over a Map column in granule mode (see MergeTreeIndexTextParams).
+    bool map_element_granule = false;
     /// Cache for tokens and their infos (cardinality, etc.)
     TextIndexTokensCachePtr tokens_cache;
     /// Cache for headers of the text index
