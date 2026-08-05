@@ -50,7 +50,7 @@ struct SharedResourcesExt
         size_t parsing_threads;
     };
 
-    static Limits getLimitsPerReader(const FormatParserSharedResources & parser_shared_resources, double fraction);
+    static Limits getLimitsPerReader(const FormatParserSharedResources & parser_shared_resources, double memory_fraction, double thread_fraction);
 };
 
 
@@ -185,6 +185,9 @@ public:
         diff->allocated(amount);
         val += amount;
     }
+
+    /// How much memory this token currently charges.
+    size_t charged() const { return val; }
 
 private:
     ReadStage alloc_stage = ReadStage::Deallocated;

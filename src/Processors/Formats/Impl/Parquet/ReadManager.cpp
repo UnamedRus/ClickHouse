@@ -74,17 +74,51 @@ void ReadManager::init(FormatParserSharedResourcesPtr parser_shared_resources_, 
         stages[i].row_group_tasks_to_schedule.resize(num_row_groups);
     }
 
-    /// Distribute memory budget among stages.
-    /// The distribution is static to make sure no stage gets starved if others eat all the memory.
-    /// E.g. if the budget was shared among all stages, maybe PrewhereData could run far ahead and
-    /// The distribution is static to make sure no stage gets starved if others eat all the memory.
-    double sum = 0;
-    stages[size_t(ReadStage::NotStarted)].memory_target_fraction = 0;
-    stages[size_t(ReadStage::Deliver)].memory_target_fraction = 0;
+    /// Distribute the memory and thread budgets among stages.
+    /// The distribution is static to make sure no stage gets starved if others eat all the resources.
+    /// E.g. if the budget was shared among all stages, maybe ColumnData could run far ahead and eat
+    /// all the memory, starving the small index reads that other row groups need to make progress.
+    ///
+    /// Memory and threads are budgeted separately (memory_target_fraction vs thread_target_fraction):
+    /// the main data (ColumnData) needs most of the memory because decoded row groups are large, but
+    /// the small index/bloom reads are latency-bound over network and want lots of parallelism while
+    /// costing little memory. A single shared fraction (the previous behavior, all stages equal at
+    /// 0.2) forced trading one for the other: ColumnData was capped at 0.2 of the budget AND 0.2 of
+    /// the threads, so on a single large remote file only ~2 row groups were read/decoded ahead,
+    /// leaving the link idle. ColumnData now gets the lion's share of memory and a larger thread
+    /// share (so more row groups are in flight, keeping more reads outstanding), while the index
+    /// stages keep enough threads to issue their many small reads in parallel.
+    ///
+    /// These are static starting points; they still couple prefetch depth to decode concurrency (a
+    /// ColumnData slot both issues the reads and holds the decoded row group). Decoupling those - so
+    /// many compressed row groups can be in flight without as many decoded ones resident - is a
+    /// separate, larger change; see the design notes. The numbers below want a perf run to tune.
+    using S = ReadStage;
+    auto set_fractions = [&](S s, double memory_fraction, double thread_fraction)
+    {
+        stages[size_t(s)].memory_target_fraction = memory_fraction;
+        stages[size_t(s)].thread_target_fraction = thread_fraction;
+    };
+    set_fractions(S::NotStarted, 0, 0);
+    set_fractions(S::BloomFilterHeader, 0.05, 1);
+    set_fractions(S::BloomFilterBlocksOrDictionary, 0.10, 1);
+    set_fractions(S::ColumnIndexAndOffsetIndex, 0.05, 1);
+    set_fractions(S::OffsetIndex, 0.05, 1);
+    set_fractions(S::ColumnData, 0.75, 3);
+    set_fractions(S::Deliver, 0, 0);
+
+    double memory_sum = 0;
+    double thread_sum = 0;
     for (const Stage & stage : stages)
-        sum += stage.memory_target_fraction;
+    {
+        memory_sum += stage.memory_target_fraction;
+        thread_sum += stage.thread_target_fraction;
+    }
     for (Stage & stage : stages)
-        stage.memory_target_fraction /= sum;
+    {
+        stage.memory_target_fraction /= memory_sum;
+        stage.thread_target_fraction /= thread_sum;
+    }
 
     /// The NotStarted stage completed for all row groups, transition to next stage.
     MemoryUsageDiff diff(ReadStage::NotStarted);
@@ -544,7 +578,7 @@ void ReadManager::flushMemoryUsageDiff(MemoryUsageDiff && diff)
         if (!should_schedule && d < 0)
         {
             const auto & stage = stages[i];
-            auto limits = SharedResourcesExt::getLimitsPerReader(*parser_shared_resources, stage.memory_target_fraction);
+            auto limits = SharedResourcesExt::getLimitsPerReader(*parser_shared_resources, stage.memory_target_fraction, stage.thread_target_fraction);
             should_schedule = checkTaskSchedulingLimits(
                 stage.memory_usage.load(std::memory_order_relaxed), 0,
                 stage.batches_in_progress.load(std::memory_order_relaxed), 0, limits);
@@ -562,7 +596,7 @@ void ReadManager::scheduleTasksIfNeeded(ReadStage stage_idx)
     MemoryUsageDiff diff(stage_idx);
     std::vector<Task> tasks;
 
-    auto limits = SharedResourcesExt::getLimitsPerReader(*parser_shared_resources, stage.memory_target_fraction);
+    auto limits = SharedResourcesExt::getLimitsPerReader(*parser_shared_resources, stage.memory_target_fraction, stage.thread_target_fraction);
     size_t memory_usage = stage.memory_usage.load(std::memory_order_relaxed);
     size_t batches_in_progress = stage.batches_in_progress.load(std::memory_order_relaxed);
 
@@ -825,7 +859,7 @@ PruningMemoryReservation ReadManager::pruningMemoryReservation(const MemoryUsage
     /// per-reader - each reserve the entire watermark, breaking its documented "total across those files"
     /// contract and overshooting the cap before scheduler throttling has a chance to help.
     size_t watermark = SharedResourcesExt::getLimitsPerReader(
-        *parser_shared_resources, stages[idx].memory_target_fraction).memory_high_watermark;
+        *parser_shared_resources, stages[idx].memory_target_fraction, stages[idx].thread_target_fraction).memory_high_watermark;
     /// Never let a tiny per-reader budget round down to 0, which `PruningMemoryReservation` reads as
     /// "unbounded"; a near-zero budget must instead mean "reserve nothing", i.e. skip pruning (full scan).
     watermark = std::max(watermark, size_t(1));
@@ -902,9 +936,28 @@ void ReadManager::runTask(Task task, bool last_in_batch, MemoryUsageDiff & diff)
                 size_t prev_page_idx = column.data_pages_idx;
 
                 chassert(task.row_subgroup_idx != UINT64_MAX);
+                ColumnSubchunk & subchunk = row_subgroup.columns.at(task.column_idx);
                 reader.decodePrimitiveColumn(
-                    column, column_info, row_subgroup.columns.at(task.column_idx),
-                    row_group, row_subgroup);
+                    column, column_info, subchunk, row_group, row_subgroup);
+
+                /// The memory charged for this subchunk before decoding (`scheduleTask`) was an
+                /// estimate from `estimateColumnMemoryBytesPerRow`, which can undershoot for long
+                /// strings or skewed data. Reconcile the charge up to the actual decoded footprint so
+                /// the stage's memory counter is honest and the scheduler stops decoding ahead before
+                /// real RAM exceeds the watermark. Grow-only: never drop below the reservation.
+                size_t actual_bytes = 0;
+                if (subchunk.column)
+                    actual_bytes += subchunk.column->allocatedBytes();
+                for (const auto & offsets : subchunk.arrays_offsets)
+                    if (offsets)
+                        actual_bytes += offsets->allocatedBytes();
+                if (subchunk.null_map)
+                    actual_bytes += subchunk.null_map->allocatedBytes();
+                if (subchunk.group_null_map)
+                    actual_bytes += subchunk.group_null_map->allocatedBytes();
+                size_t already_charged = subchunk.column_and_offsets_memory.charged();
+                if (actual_bytes > already_charged)
+                    subchunk.column_and_offsets_memory.add(actual_bytes - already_charged, &diff);
 
                 for (size_t i = prev_page_idx; i < column.data_pages_idx; ++i)
                 {
