@@ -936,28 +936,9 @@ void ReadManager::runTask(Task task, bool last_in_batch, MemoryUsageDiff & diff)
                 size_t prev_page_idx = column.data_pages_idx;
 
                 chassert(task.row_subgroup_idx != UINT64_MAX);
-                ColumnSubchunk & subchunk = row_subgroup.columns.at(task.column_idx);
                 reader.decodePrimitiveColumn(
-                    column, column_info, subchunk, row_group, row_subgroup);
-
-                /// The memory charged for this subchunk before decoding (`scheduleTask`) was an
-                /// estimate from `estimateColumnMemoryBytesPerRow`, which can undershoot for long
-                /// strings or skewed data. Reconcile the charge up to the actual decoded footprint so
-                /// the stage's memory counter is honest and the scheduler stops decoding ahead before
-                /// real RAM exceeds the watermark. Grow-only: never drop below the reservation.
-                size_t actual_bytes = 0;
-                if (subchunk.column)
-                    actual_bytes += subchunk.column->allocatedBytes();
-                for (const auto & offsets : subchunk.arrays_offsets)
-                    if (offsets)
-                        actual_bytes += offsets->allocatedBytes();
-                if (subchunk.null_map)
-                    actual_bytes += subchunk.null_map->allocatedBytes();
-                if (subchunk.group_null_map)
-                    actual_bytes += subchunk.group_null_map->allocatedBytes();
-                size_t already_charged = subchunk.column_and_offsets_memory.charged();
-                if (actual_bytes > already_charged)
-                    subchunk.column_and_offsets_memory.add(actual_bytes - already_charged, &diff);
+                    column, column_info, row_subgroup.columns.at(task.column_idx),
+                    row_group, row_subgroup, diff);
 
                 for (size_t i = prev_page_idx; i < column.data_pages_idx; ++i)
                 {

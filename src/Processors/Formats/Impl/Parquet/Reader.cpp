@@ -2358,7 +2358,7 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
     ProfileEvents::increment(ProfileEvents::ParquetConstantColumnChunks);
 }
 
-void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info, ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup)
+void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info, ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup, MemoryUsageDiff & diff)
 {
     if (column.is_constant)
     {
@@ -2555,6 +2555,23 @@ void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnIn
     }
 
     chassert(subchunk.column->getDataType() == column_info.output_type->getColumnType());
+
+    /// The memory charged for this subchunk in scheduleTask was an estimate
+    /// (estimateColumnMemoryBytesPerRow), which can undershoot for long strings or skewed data, so
+    /// real RAM would overshoot the watermark and the overshoot compounds with decode-ahead depth.
+    /// Reconcile the charge up to the actual decoded footprint now, before formOutputColumn (below)
+    /// may move `subchunk.column` into the output, so the stage counter is honest and the scheduler
+    /// stops decoding ahead before real RAM exceeds the cap. Grow-only: never drop below the
+    /// reservation (fail-closed).
+    size_t actual_bytes = subchunk.column->allocatedBytes();
+    for (const auto & offsets : subchunk.arrays_offsets)
+        if (offsets)
+            actual_bytes += offsets->allocatedBytes();
+    if (subchunk.group_null_map)
+        actual_bytes += subchunk.group_null_map->allocatedBytes();
+    size_t already_charged = subchunk.column_and_offsets_memory.charged();
+    if (actual_bytes > already_charged)
+        subchunk.column_and_offsets_memory.add(actual_bytes - already_charged, &diff);
 
     OutputColumnState & state = row_subgroup.output.at(column_info.idx_in_output_block);
     chassert(!state.column);
