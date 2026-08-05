@@ -338,6 +338,13 @@ struct Reader
         bool use_column_index = false;
         bool need_null_map = false;
 
+        /// This column chunk provably holds a single repeated value in every row (see
+        /// detectConstantColumn). When set, we skip prefetching and decoding the data pages and
+        /// materialize `constant_value` directly instead. `constant_value` is the already-decoded
+        /// value (not the raw parquet-encoded bytes).
+        bool is_constant = false;
+        Field constant_value;
+
         /// Prefetches.
         /// TODO [parquet]: Check that all handles and tokens are reset after correct stages.
         PrefetchHandle bloom_filter_header_prefetch;
@@ -395,6 +402,13 @@ struct Reader
     {
         /// Primitive column.
         MutableColumnPtr column;
+
+        /// Set by decodePrimitiveColumn when the source column chunk is constant (see
+        /// ColumnChunk::is_constant): `column` is then left empty and formOutputColumn materializes
+        /// `constant_value` directly in the final output type. `constant_value` is in the output
+        /// (post-cast) domain.
+        bool is_constant = false;
+        Field constant_value;
 
         MutableColumnPtr null_map;
 
@@ -606,6 +620,12 @@ struct Reader
     double estimateColumnMemoryBytesPerRow(const ColumnChunk & column, const RowGroup & row_group, const PrimitiveColumnInfo & column_info) const;
 
     void decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info, ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup);
+
+    /// If the column chunk provably holds one repeated value in every row, sets column.is_constant
+    /// and column.constant_value. Uses column chunk min/max statistics (Tier 1). Only applies to
+    /// flat, top-level primitive columns with no element nulls; see the implementation for the
+    /// exact conditions.
+    void detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info) const;
 
     /// Returns mutable column because some of the recursive calls require it,
     /// e.g. ColumnArray::create does assumeMutable() on the nested columns.

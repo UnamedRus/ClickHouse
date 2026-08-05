@@ -70,6 +70,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"distributed_cache_min_inflight_bytes_to_discard_connection_on_seek", 0, 4 * 1024 * 1024, "New setting to drop and reopen a distributed cache connection on a seek when too many in-flight bytes would otherwise be discarded. Defaults to 4 MiB; 0 restores the previous behavior (always reuse the connection via the read range id)."},
             {"input_format_parquet_spatial_filter_push_down", false, true, "New setting: skip GeoParquet row groups and pages based on spatial predicates and bounding box statistics"},
             {"use_text_index_negative_tokens_cache", false, true, "New setting to cache absent text index tokens and avoid repeated dictionary lookups."},
+            {"input_format_parquet_use_constant_column_optimization", false, true, "New setting: when a Parquet column chunk provably holds a single value in every row (per its min/max statistics), materialize that value directly instead of reading and decoding the column's data pages (reader v3)."},
         });
         addSettingsChanges(settings_changes_history, "26.7",
         {
