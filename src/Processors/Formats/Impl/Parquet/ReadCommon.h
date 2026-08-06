@@ -88,6 +88,10 @@ enum class ReadStage
     ColumnIndexAndOffsetIndex,
 
     OffsetIndex,
+    /// Issues the compressed data-page reads (startPrefetch) but does not decode. Charged to its own
+    /// memory budget so many row groups can have their reads in flight (deep prefetch) while only a
+    /// few are decoded at once (ColumnData). Decouples fetch depth from decode-ahead depth.
+    ColumnDataPrefetch,
     ColumnData,
 
     Deliver,
