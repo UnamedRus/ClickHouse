@@ -1352,11 +1352,11 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
     /// Only flat, top-level primitive columns, so that one parquet value maps 1:1 to one output row
     /// and formOutputColumn can materialize the value directly. Exclude:
     ///  - arrays (leaf repetition level > 0, or any array level: max_array_def > 0),
-    ///  - physically-nullable structs read as Nullable(Tuple(...)) (group_nullable),
-    ///  - leaves nested inside a Tuple/Map/Array output column (the output column is not primitive).
+    ///  - leaves nested inside a Tuple/Map/Array output column (the output column is not primitive;
+    ///    this also covers physically-nullable structs, whose leaves are not primitive outputs).
     /// A plain Nullable(T) is fine: it adds a definition level but no repetition, and its output
     /// column is still primitive; the no-nulls check below and the output_nullable wrap handle it.
-    if (column_info.levels.back().rep != 0 || column_info.max_array_def != 0 || column_info.group_nullable)
+    if (column_info.levels.back().rep != 0 || column_info.max_array_def != 0)
         return;
     if (column_info.idx_in_output_block >= sample_block_to_output_columns_idx.size())
         return;
@@ -1599,8 +1599,6 @@ void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnIn
     for (const auto & offsets : subchunk.arrays_offsets)
         if (offsets)
             actual_bytes += offsets->allocatedBytes();
-    if (subchunk.group_null_map)
-        actual_bytes += subchunk.group_null_map->allocatedBytes();
     size_t already_charged = subchunk.column_and_offsets_memory.charged();
     if (actual_bytes > already_charged)
         subchunk.column_and_offsets_memory.add(actual_bytes - already_charged, &diff);
