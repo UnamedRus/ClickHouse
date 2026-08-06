@@ -71,6 +71,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
             {"input_format_parquet_spatial_filter_push_down", false, true, "New setting: skip GeoParquet row groups and pages based on spatial predicates and bounding box statistics"},
             {"use_text_index_negative_tokens_cache", false, true, "New setting to cache absent text index tokens and avoid repeated dictionary lookups."},
             {"input_format_parquet_use_constant_column_optimization", false, true, "New setting: when a Parquet column chunk provably holds a single value in every row (per its min/max statistics), materialize that value directly instead of reading and decoding the column's data pages (reader v3)."},
+            {"input_format_parquet_prefetch_bandwidth_hide_seconds", 0., 0., "New setting: read back-pressure for the Parquet v3 reader; stop prefetching compressed data pages ahead of decoding once in-flight compressed bytes exceed this many seconds of measured throughput. 0 (default) disables it."},
         });
         addSettingsChanges(settings_changes_history, "26.7",
         {

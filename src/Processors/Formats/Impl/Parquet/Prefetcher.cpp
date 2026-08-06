@@ -34,6 +34,18 @@ void Prefetcher::init(ReadBuffer * reader_, const ReadOptions & options, FormatP
     parser_shared_resources = parser_shared_resources_;
     determineReadModeAndFileSize(reader_, options);
     range_sets.resize(1);
+    read_start_time = std::chrono::steady_clock::now();
+}
+
+double Prefetcher::averageThroughputBytesPerSec() const
+{
+    double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - read_start_time).count();
+    size_t bytes = total_bytes_read.load(std::memory_order_relaxed);
+    /// Too little read / too little time elapsed to estimate: report "unknown" so back-pressure
+    /// fails open (does not throttle).
+    if (seconds < 0.05 || bytes < (1u << 20))
+        return 0;
+    return static_cast<double>(bytes) / seconds;
 }
 
 Prefetcher::~Prefetcher()
@@ -522,6 +534,7 @@ Prefetcher::Task::State Prefetcher::runTask(Task * task)
             task->buf.resize(task->length);
             readSync(task->buf.data(), task->length, task->offset);
         }
+        total_bytes_read.fetch_add(task->length, std::memory_order_relaxed);
     }
     catch (...)
     {
