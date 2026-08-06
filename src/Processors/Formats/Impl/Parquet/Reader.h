@@ -303,6 +303,11 @@ struct Reader
         /// value (not the raw parquet-encoded bytes).
         bool is_constant = false;
         Field constant_value;
+        /// Sub-case of `is_constant`: the chunk is provably all-null (null_count == num_values).
+        /// `constant_value` is then `Null` for a Nullable output, or the output default when
+        /// `null_as_default` substitutes nulls for a non-nullable output. formOutputColumn also
+        /// records every row in block_missing_values (the plain constant case has no nulls).
+        bool is_all_null = false;
 
         /// Prefetches.
         /// TODO [parquet]: Check that all handles and tokens are reset after correct stages.
@@ -360,6 +365,8 @@ struct Reader
         /// (post-cast) domain.
         bool is_constant = false;
         Field constant_value;
+        /// Mirror of ColumnChunk::is_all_null (see there).
+        bool is_all_null = false;
 
         MutableColumnPtr null_map;
 
@@ -527,9 +534,11 @@ struct Reader
     void decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info, ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup, MemoryUsageDiff & diff);
 
     /// If the column chunk provably holds one repeated value in every row, sets column.is_constant
-    /// and column.constant_value. Uses column chunk min/max statistics (Tier 1). Only applies to
-    /// flat, top-level primitive columns with no element nulls; see the implementation for the
-    /// exact conditions.
+    /// and column.constant_value. Two sub-cases, both from column chunk statistics (Tier 1):
+    ///  - a single non-null value in every row (min_value == max_value, no nulls), or
+    ///  - an all-null chunk (null_count == num_values), which also sets column.is_all_null.
+    /// Only applies to flat, top-level primitive columns; see the implementation for the exact
+    /// conditions.
     void detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info) const;
 
     /// Returns mutable column because some of the recursive calls require it,

@@ -1369,12 +1369,38 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
         return;
     const auto & stats = meta_data.statistics;
 
+    bool physically_nullable = column_info.levels.back().def > 0;
+
+    /// All-null chunk: every row is null (null_count == num_values). This is provable only for a
+    /// physically nullable leaf (a REQUIRED column can have no nulls), and only when the writer
+    /// emitted the null_count statistic. No value is decoded at all, so this skips the min/max
+    /// exactness and truncation concerns below. We materialize `Null` for a Nullable output, or the
+    /// output default when `null_as_default` substitutes nulls for a non-nullable output; a
+    /// non-nullable output without null substitution cannot represent the result, so we leave the
+    /// chunk to the normal decode path (which errors on the null). formOutputColumn records every
+    /// row in block_missing_values for this case.
+    if (physically_nullable && stats.__isset.null_count && stats.null_count == meta_data.num_values
+        && meta_data.num_values > 0)
+    {
+        const bool null_as_default = options.format.null_as_default && !column_info.output_nullable;
+        if (column_info.output_nullable)
+            column.constant_value = Null{};
+        else if (null_as_default)
+            column.constant_value = column_info.output_type->getDefault();
+        else
+            return;
+
+        column.is_constant = true;
+        column.is_all_null = true;
+        ProfileEvents::increment(ProfileEvents::ParquetConstantColumnChunks);
+        return;
+    }
+
     /// All rows must be non-null. If the parquet column is physically nullable (max definition level
     /// > 0), require the statistics to prove zero nulls. If it is REQUIRED (definition level 0) there
     /// can be no nulls, so the null_count statistic - which writers commonly omit for non-nullable
     /// columns - is unnecessary. A chunk that mixes the value with nulls has two distinct logical
-    /// values and still needs a null map. (An all-null chunk is a separate, not-yet-handled case.)
-    bool physically_nullable = column_info.levels.back().def > 0;
+    /// values and still needs a null map.
     if (physically_nullable && (!stats.__isset.null_count || stats.null_count != 0))
         return;
 
@@ -1416,6 +1442,7 @@ void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnIn
         /// is formed once the last of its primitive columns is done.
         subchunk.is_constant = true;
         subchunk.constant_value = column.constant_value;
+        subchunk.is_all_null = column.is_all_null;
 
         OutputColumnState & state = row_subgroup.output.at(column_info.idx_in_output_block);
         chassert(!state.column);
@@ -2274,10 +2301,18 @@ MutableColumnPtr Reader::formOutputColumn(RowSubgroup & row_subgroup, size_t out
         {
             /// Constant column chunk (see detectConstantColumn): materialize the single value
             /// directly in the final output type. The value is already in the output (post-cast)
-            /// domain, so we skip the decoded_type column and the castColumn below. The chunk has no
-            /// nulls, so there is nothing to record in block_missing_values.
+            /// domain, so we skip the decoded_type column and the castColumn below.
             auto constant_column = output_info.output_type->createColumn();
             constant_column->insertMany(subchunk.constant_value, num_rows);
+
+            /// An all-null chunk must record every row in block_missing_values, matching the normal
+            /// decode path (which records nulls from the null map); needed for
+            /// input_format_null_as_default. The single-value case has no nulls, so records nothing.
+            if (subchunk.is_all_null
+                && output_info.idx_in_output_block.has_value()
+                && *output_info.idx_in_output_block < row_subgroup.block_missing_values.getNumColumns())
+                row_subgroup.block_missing_values.setBits(*output_info.idx_in_output_block, num_rows);
+
             return constant_column;
         }
 
