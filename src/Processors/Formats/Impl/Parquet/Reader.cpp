@@ -2314,12 +2314,19 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
     if (!column_info.decoder.allow_stats)
         return;
 
-    /// Only flat, top-level primitive columns. Nested columns (arrays, tuples, maps) and
-    /// physically-nullable structs carry repetition/definition level information that we would skip
-    /// by not reading the pages, so restrict to the simple case where "value" == "row".
-    if (column_info.levels.size() != 1 || column_info.group_nullable)
+    /// Only flat, top-level primitive columns, so that one parquet value maps 1:1 to one output row
+    /// and formOutputColumn can materialize the value directly. Exclude:
+    ///  - arrays (leaf repetition level > 0, or any array level: max_array_def > 0),
+    ///  - physically-nullable structs read as Nullable(Tuple(...)) (group_nullable),
+    ///  - leaves nested inside a Tuple/Map/Array output column (the output column is not primitive).
+    /// A plain Nullable(T) is fine: it adds a definition level but no repetition, and its output
+    /// column is still primitive; the no-nulls check below and the output_nullable wrap handle it.
+    if (column_info.levels.back().rep != 0 || column_info.max_array_def != 0 || column_info.group_nullable)
         return;
-    if (column_info.levels.back().is_array || column_info.levels.back().rep != 0)
+    if (column_info.idx_in_output_block >= sample_block_to_output_columns_idx.size())
+        return;
+    const auto & output_idx = sample_block_to_output_columns_idx.at(column_info.idx_in_output_block);
+    if (!output_idx.has_value() || !output_columns[output_idx.value()].is_primitive)
         return;
 
     const auto & meta_data = column.meta->meta_data;
@@ -2327,9 +2334,13 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
         return;
     const auto & stats = meta_data.statistics;
 
-    /// All rows must be non-null. A chunk with both a value and some nulls has two distinct logical
+    /// All rows must be non-null. If the parquet column is physically nullable (max definition level
+    /// > 0), require the statistics to prove zero nulls. If it is REQUIRED (definition level 0) there
+    /// can be no nulls, so the null_count statistic - which writers commonly omit for non-nullable
+    /// columns - is unnecessary. A chunk that mixes the value with nulls has two distinct logical
     /// values and still needs a null map. (An all-null chunk is a separate, not-yet-handled case.)
-    if (!stats.__isset.null_count || stats.null_count != 0)
+    bool physically_nullable = column_info.levels.back().def > 0;
+    if (physically_nullable && (!stats.__isset.null_count || stats.null_count != 0))
         return;
 
     if (!stats.__isset.min_value || !stats.__isset.max_value)
