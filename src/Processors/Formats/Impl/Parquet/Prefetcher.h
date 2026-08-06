@@ -3,6 +3,8 @@
 #include <Common/PODArray.h>
 #include <Processors/Formats/Impl/Parquet/ReadCommon.h>
 
+#include <atomic>
+#include <chrono>
 #include <optional>
 #include <span>
 
@@ -62,6 +64,10 @@ public:
     void readSync(char * to, size_t n, size_t offset);
 
     size_t getFileSize() const { return file_size; }
+
+    /// Average completed-read throughput (bytes/sec) since init, or 0 if not enough has been read to
+    /// estimate. Used for read back-pressure (input_format_parquet_prefetch_bandwidth_hide_seconds).
+    double averageThroughputBytesPerSec() const;
 
 private:
     friend class PrefetchHandle;
@@ -178,6 +184,10 @@ private:
     size_t file_size{};
     size_t min_bytes_for_seek{};
     size_t bytes_per_read_task{};
+
+    /// Total bytes read by completed tasks, and when reading started, for throughput estimation.
+    std::atomic<size_t> total_bytes_read{0};
+    std::chrono::steady_clock::time_point read_start_time{};
 
     std::shared_ptr<ShutdownHelper> shutdown = std::make_shared<ShutdownHelper>();
 

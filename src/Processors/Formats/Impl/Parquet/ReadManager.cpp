@@ -616,6 +616,20 @@ void ReadManager::scheduleTasksIfNeeded(ReadStage stage_idx)
     size_t memory_usage = stage.memory_usage.load(std::memory_order_relaxed);
     size_t batches_in_progress = stage.batches_in_progress.load(std::memory_order_relaxed);
 
+    /// Read back-pressure (finding #4): once the compressed data already in flight covers more than
+    /// `prefetch_bandwidth_hide_seconds` of the measured read throughput, the storage link is fed, so
+    /// stop prefetching further ahead - extra compressed buffering would only waste memory without
+    /// improving throughput. The compressed in-flight bytes are exactly this stage's memory usage.
+    /// Fail-open: 0 (disabled), or unknown throughput, means no throttle. The privileged-task escape
+    /// below still applies, so this can never deadlock.
+    double prefetch_ahead_bytes_limit = 0; // 0 = no back-pressure
+    if (stage_idx == ReadStage::ColumnDataPrefetch && reader.options.format.parquet.prefetch_bandwidth_hide_seconds > 0)
+    {
+        double throughput = reader.prefetcher.averageThroughputBytesPerSec();
+        if (throughput > 0)
+            prefetch_ahead_bytes_limit = throughput * reader.options.format.parquet.prefetch_bandwidth_hide_seconds;
+    }
+
     LOG_TEST(getLogger("ParquetReadManager"), "scheduleTasksIfNeeded: stage={} memory_usage={} batches_in_progress={} limits: mem_low={} mem_high={} threads={}",
               magic_enum::enum_name(stage_idx), memory_usage, batches_in_progress,
               limits.memory_low_watermark, limits.memory_high_watermark, limits.parsing_threads);
@@ -649,6 +663,14 @@ void ReadManager::scheduleTasksIfNeeded(ReadStage stage_idx)
         bool can_schedule = checkTaskSchedulingLimits(
                 memory_usage, size_t(diff.by_stage[size_t(stage_idx)]),
                 batches_in_progress, tasks.size(), limits);
+        /// Bandwidth back-pressure: hold off further prefetch when the link is already fed.
+        if (can_schedule && prefetch_ahead_bytes_limit > 0)
+        {
+            double compressed_in_flight = static_cast<double>(memory_usage)
+                + static_cast<double>(std::max<ssize_t>(0, diff.by_stage[size_t(stage_idx)]));
+            if (compressed_in_flight >= prefetch_ahead_bytes_limit)
+                can_schedule = false;
+        }
         bool is_privileged = is_privileged_task(row_group_idx);
         LOG_TEST(getLogger("ParquetReadManager"), "scheduleTasksIfNeeded: stage={} rg={} can_schedule={} is_privileged={}",
                   magic_enum::enum_name(stage_idx), row_group_idx, can_schedule, is_privileged);
