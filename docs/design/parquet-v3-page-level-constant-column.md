@@ -69,7 +69,11 @@ dictionary encoding stats) instead of an all-or-nothing switch.
 
 ## Guardrails
 
-- Fixed-width numeric/date/time only (truncation).
+- All types, including `BYTE_ARRAY` / `FIXED_LEN_BYTE_ARRAY` strings. No truncation guard is needed
+  for the `min == max` case: statistics/Column-Index bounds are always valid
+  (`min <= every value <= max`) and truncation only widens them, so `min == max` proves a single
+  exact value (a truncated or multi-valued page yields `min < max`). This holds at both the chunk
+  level (tier 1) and per page (tier 2), so neither needs the `is_*_value_exact` flag.
 - Gate on the existing `input_format_parquet_use_constant_column_optimization` setting; the
   force-load above is additionally gated by
   `input_format_parquet_use_column_index_for_constant_columns`.

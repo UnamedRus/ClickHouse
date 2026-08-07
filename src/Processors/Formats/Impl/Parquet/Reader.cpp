@@ -985,13 +985,12 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
 
         /// Tier 2 constant-column detection: retain per-page constant info from the Column Index for
         /// use by detectConstantSubchunk. Only when eligible and the whole chunk is not already
-        /// constant (tier 1). For truncatable physical types the Column Index has no per-page
-        /// exactness flag, so a per-page min == max is untrustworthy: record only `all_null` there.
+        /// constant (tier 1). No truncation guard is needed even though the Column Index has no
+        /// per-page exactness flag: bounds are always valid (min_value <= every value <= max_value)
+        /// and truncation only widens them, so a per-page min_value == max_value proves a single exact
+        /// value - for BYTE_ARRAY strings too (a truncated value would give min_value < max_value).
         const bool record_page_const =
             constColumnMaterializationEligible(column_info) && !column.is_constant;
-        const bool may_be_truncated =
-            column.meta->meta_data.type == parq::Type::BYTE_ARRAY
-            || column.meta->meta_data.type == parq::Type::FIXED_LEN_BYTE_ARRAY;
         if (record_page_const)
             column.page_const_info.assign(num_pages, ColumnChunk::PageConstInfo{});
 
@@ -1024,7 +1023,7 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
                 /// A page with no nulls whose decoded min == max holds a single value (post-cast
                 /// output domain, like tier 1). Captured before adjustRangeFromIndexIfNeeded, which
                 /// mutates the range for null/default handling.
-                if (record_page_const && !may_be_truncated && !can_be_null
+                if (record_page_const && !can_be_null
                     && !range.left.isNull() && range.left == range.right)
                 {
                     column.page_const_info[page_idx].is_const = true;
@@ -1513,15 +1512,11 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
     if (stats.min_value != stats.max_value)
         return;
 
-    /// For BYTE_ARRAY / FIXED_LEN_BYTE_ARRAY the writer may store truncated min/max, which could make
-    /// two different values compare equal. Trust min == max only when the writer marked both exact.
-    /// Fixed-width numeric types are never truncated, so min == max is always exact for them.
-    const bool may_be_truncated =
-        meta_data.type == parq::Type::BYTE_ARRAY || meta_data.type == parq::Type::FIXED_LEN_BYTE_ARRAY;
-    if (may_be_truncated
-        && !(stats.__isset.is_min_value_exact && stats.is_min_value_exact
-             && stats.__isset.is_max_value_exact && stats.is_max_value_exact))
-        return;
+    /// No truncation guard is needed for the min == max case, including BYTE_ARRAY /
+    /// FIXED_LEN_BYTE_ARRAY. Statistics bounds are always valid (min_value <= every value <=
+    /// max_value) and truncation only ever widens them, so a truncated value - or any chunk with two
+    /// distinct values - yields min_value < max_value. Hence min_value == max_value can only occur for
+    /// a single value short enough to be stored exactly, so `is_*_value_exact` is implied.
 
     Field value;
     column_info.decoder.decodeField(stats.min_value, /*is_max=*/ false, value);
