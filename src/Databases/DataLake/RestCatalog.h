@@ -150,7 +150,7 @@ public:
         bool allow_tables = false;
     };
 
-private:
+protected:
     AllowedNamespaces allowed_namespaces;
 
     Poco::Net::HTTPBasicCredentials credentials{};
