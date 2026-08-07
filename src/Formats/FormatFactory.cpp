@@ -221,6 +221,7 @@ FormatSettings getFormatSettings(const ContextPtr & context, const Settings & se
     format_settings.parquet.use_offset_index = settings[Setting::input_format_parquet_use_offset_index];
     format_settings.parquet.use_constant_column_optimization = settings[Setting::input_format_parquet_use_constant_column_optimization];
     format_settings.parquet.use_column_index_for_constant_columns = settings[Setting::input_format_parquet_use_column_index_for_constant_columns];
+    format_settings.parquet.fill_constant_pages = settings[Setting::input_format_parquet_fill_constant_pages];
     format_settings.parquet.prefetch_bandwidth_hide_seconds = settings[Setting::input_format_parquet_prefetch_bandwidth_hide_seconds];
 
     format_settings.parquet.enable_json_parsing = settings[Setting::input_format_parquet_enable_json_parsing];

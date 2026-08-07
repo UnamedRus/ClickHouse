@@ -213,6 +213,9 @@ When a Parquet column chunk provably holds a single value in every row (accordin
     DECLARE(Bool, input_format_parquet_use_column_index_for_constant_columns, false, R"(
 Load the Parquet Column Index for read columns that have no predicate of their own, so the constant-column optimization can also skip data pages that are single-valued over a row subgroup (not just over a whole column chunk). Costs a small extra read of the (tiny) Column Index; only worthwhile when columns are sorted or low-cardinality. Applies only when `input_format_parquet_use_constant_column_optimization` is enabled.
 )", 0) \
+    DECLARE(Bool, input_format_parquet_fill_constant_pages, false, R"(
+Experimental. When a Parquet column is single-valued over some data pages but not the whole row subgroup, fill those pages' rows from the per-page Column Index statistics instead of reading and decoding them (mixed-topology subgroups). Extends the constant-column optimization below the subgroup granularity. Requires `input_format_parquet_use_constant_column_optimization`; disabled by default.
+)", 0) \
     DECLARE(Double, input_format_parquet_prefetch_bandwidth_hide_seconds, 0, R"(
 Read back-pressure for the Parquet v3 reader. When greater than zero, stop prefetching more compressed data pages ahead of decoding once the in-flight compressed bytes exceed this many seconds' worth of the measured read throughput (i.e. once the storage link is kept busy). Prevents buffering compressed data far beyond what bandwidth can consume. 0 disables the back-pressure (compressed prefetch is then bounded only by its memory budget).
 )", 0) \

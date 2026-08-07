@@ -1592,6 +1592,108 @@ bool Reader::detectConstantSubchunk(
     return false;
 }
 
+bool Reader::willFillConstantPages(
+    const ColumnChunk & column, const PrimitiveColumnInfo & column_info,
+    const RowGroup & row_group, const RowSubgroup & row_subgroup) const
+{
+    if (!options.format.parquet.fill_constant_pages)
+        return false;
+    if (column.is_constant)
+        return false; // whole chunk already constant (tier 1)
+    if (column.page_const_info.empty())
+        return false; // no Column Index info retained
+    if (column_info.column_index_condition)
+        return false; // a predicate on this column may have pruned pages; keep the standard path
+    if (!constColumnMaterializationEligible(column_info))
+        return false;
+    if (row_subgroup.filter.rows_pass != row_subgroup.filter.rows_total)
+        return false; // some rows filtered out in this subgroup; avoid filter/range intersection
+
+    /// We fill the decoded_type column with the output-domain value from the Column Index, which is
+    /// only valid when no post-decode cast is applied (decoded_type == output value type).
+    const auto & output_idx = sample_block_to_output_columns_idx.at(column_info.idx_in_output_block);
+    if (!output_idx.has_value() || output_columns[output_idx.value()].needs_cast)
+        return false;
+
+    const auto & pages = column.offset_index.page_locations;
+    const size_t num_pages = pages.size();
+    if (num_pages == 0 || column.page_const_info.size() != num_pages)
+        return false;
+
+    /// Require at least one single-value page and no all-null page overlapping the subgroup (all-null
+    /// pages are not handled by the fill; fall back to the standard decode for those subgroups).
+    const size_t start = row_subgroup.start_row_idx;
+    const size_t end = start + row_subgroup.filter.rows_total;
+    const size_t rg_rows = size_t(row_group.meta->num_rows);
+    bool any_const = false;
+    for (size_t p = 0; p < num_pages; ++p)
+    {
+        const size_t p_start = size_t(pages[p].first_row_index);
+        const size_t p_end = (p + 1 < num_pages) ? size_t(pages[p + 1].first_row_index) : rg_rows;
+        if (p_end <= start || p_start >= end)
+            continue;
+        const auto & pci = column.page_const_info[p];
+        if (pci.all_null)
+            return false;
+        if (pci.is_const)
+            any_const = true;
+    }
+    return any_const;
+}
+
+void Reader::fillConstantPagesAndDecodeRest(
+    ColumnChunk & column, const PrimitiveColumnInfo & column_info,
+    ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup)
+{
+    const size_t start = row_subgroup.start_row_idx;
+    const size_t end = start + row_subgroup.filter.rows_total;
+    const auto & pages = column.offset_index.page_locations;
+    const size_t num_pages = pages.size();
+    const size_t rg_rows = size_t(row_group.meta->num_rows);
+
+    ColumnUInt8::Container * null_map_data = subchunk.null_map
+        ? &assert_cast<ColumnUInt8 &>(*subchunk.null_map).getData()
+        : nullptr;
+
+    /// Position at the first page overlapping `start`.
+    size_t p = 0;
+    while (p < num_pages && (p + 1 < num_pages ? size_t(pages[p + 1].first_row_index) : rg_rows) <= start)
+        ++p;
+
+    size_t row = start;
+    while (row < end)
+    {
+        chassert(p < num_pages);
+        const size_t p_end = (p + 1 < num_pages) ? size_t(pages[p + 1].first_row_index) : rg_rows;
+        const size_t seg_end = std::min(end, p_end);
+        chassert(seg_end > row);
+        const size_t count = seg_end - row;
+        const auto & pci = column.page_const_info[p];
+
+        if (pci.is_const)
+        {
+            /// Fill the single value without reading the page. Value is in the output value domain,
+            /// which equals decoded_type here (willFillConstantPages required no cast). A single-value
+            /// page has no nulls, so any null map gets zeros for these rows.
+            subchunk.column->insertMany(pci.value, count);
+            if (null_map_data)
+                null_map_data->resize_fill(null_map_data->size() + count, 0);
+        }
+        else
+        {
+            /// Varying page: decode [row, seg_end) via the normal machinery. skipToRowOrNextPage jumps
+            /// to this page (via the offset index), stepping over any filled const pages without
+            /// loading them; readRowsInPage appends the decoded values (and null-map entries).
+            skipToRowOrNextPage(row, column, column_info);
+            readRowsInPage(seg_end, subchunk, column, column_info, &row_subgroup);
+        }
+
+        row = seg_end;
+        if (row == p_end)
+            ++p;
+    }
+}
+
 void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info, ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup, MemoryUsageDiff & diff)
 {
     /// subchunk.is_constant is set either here from column.is_constant (tier 1, whole chunk) or
@@ -1661,6 +1763,16 @@ void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnIn
         string_column->getChars().reserve(bytes_to_reserve);
     }
 
+    /// Mixed-topology fill (input_format_parquet_fill_constant_pages): when only part of this
+    /// subgroup is single-valued, fill the constant pages from the Column Index and decode only the
+    /// varying ones. Produces a full decoded_type column, so it replaces the decode loop below.
+    bool filled_constant_pages = false;
+    if (willFillConstantPages(column, column_info, row_group, row_subgroup))
+    {
+        fillConstantPagesAndDecodeRest(column, column_info, subchunk, row_group, row_subgroup);
+        filled_constant_pages = true;
+    }
+
     /// Find ranges of rows that pass filter and decode them.
 
     /// When we have per-page prefetches (offset index), some pages may have had their prefetch
@@ -1684,7 +1796,11 @@ void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnIn
         !column.need_null_map;
     const size_t subgroup_end_row_idx = row_subgroup.start_row_idx + row_subgroup.filter.rows_total;
 
-    if (use_filter_in_decoder)
+    if (filled_constant_pages)
+    {
+        /// Already produced the whole subchunk column above; skip the normal decode loop.
+    }
+    else if (use_filter_in_decoder)
     {
         skipToRowOrNextPage(row_subgroup.start_row_idx, column, column_info);
 

@@ -568,6 +568,16 @@ struct Reader
         size_t start_row, size_t end_row, size_t row_group_num_rows,
         bool & out_all_null, Field & out_value) const;
 
+    /// Mixed-topology fill (input_format_parquet_fill_constant_pages): true when this subgroup has
+    /// some single-value pages (and no all-null pages) that can be filled from the Column Index
+    /// while the rest is decoded normally. See willFillConstantPages / fillConstantPagesAndDecodeRest.
+    bool willFillConstantPages(
+        const ColumnChunk & column, const PrimitiveColumnInfo & column_info,
+        const RowGroup & row_group, const RowSubgroup & row_subgroup) const;
+    void fillConstantPagesAndDecodeRest(
+        ColumnChunk & column, const PrimitiveColumnInfo & column_info,
+        ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup);
+
     /// Returns mutable column because some of the recursive calls require it,
     /// e.g. ColumnArray::create does assumeMutable() on the nested columns.
     /// Moves the column out of ColumnSubchunk-s, leaving nullptrs in ColumnSubchunk::column.
