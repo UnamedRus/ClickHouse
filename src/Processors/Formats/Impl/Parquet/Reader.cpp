@@ -1,4 +1,5 @@
 #include <Columns/ColumnArray.h>
+#include <Columns/ColumnConst.h>
 #include <Columns/ColumnMap.h>
 #include <Columns/ColumnNullable.h>
 #include <Columns/ColumnsCommon.h>
@@ -2299,11 +2300,14 @@ MutableColumnPtr Reader::formOutputColumn(RowSubgroup & row_subgroup, size_t out
 
         if (subchunk.is_constant)
         {
-            /// Constant column chunk (see detectConstantColumn): materialize the single value
-            /// directly in the final output type. The value is already in the output (post-cast)
-            /// domain, so we skip the decoded_type column and the castColumn below.
-            auto constant_column = output_info.output_type->createColumn();
-            constant_column->insertMany(subchunk.constant_value, num_rows);
+            /// Constant column chunk (see detectConstantColumn): the whole chunk is a single value,
+            /// so materialize it as a ColumnConst rather than an expanded column. This is O(1) instead
+            /// of O(rows), and the const-ness propagates downstream: a PREWHERE/WHERE predicate
+            /// computes its result from the value without expanding the stored column, and GROUP BY /
+            /// aggregation over this column get a const key. The value is already in the output
+            /// (post-cast) domain, so we skip the decoded_type column and the castColumn below.
+            MutableColumnPtr single_value = output_info.output_type->createColumn();
+            single_value->insert(subchunk.constant_value);
 
             /// An all-null chunk must record every row in block_missing_values, matching the normal
             /// decode path (which records nulls from the null map); needed for
@@ -2313,7 +2317,7 @@ MutableColumnPtr Reader::formOutputColumn(RowSubgroup & row_subgroup, size_t out
                 && *output_info.idx_in_output_block < row_subgroup.block_missing_values.getNumColumns())
                 row_subgroup.block_missing_values.setBits(*output_info.idx_in_output_block, num_rows);
 
-            return constant_column;
+            return ColumnConst::create(std::move(single_value), num_rows);
         }
 
         res = std::move(subchunk.column);
