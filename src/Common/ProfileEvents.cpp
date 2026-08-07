@@ -1443,6 +1443,7 @@ The server successfully detected this situation and will download merged part fr
     M(ParquetReadRowGroups, "The total number of row groups read from parquet data", ValueType::Number) \
     M(ParquetPrunedRowGroups, "The total number of row groups pruned from parquet data", ValueType::Number) \
     M(ParquetConstantColumnChunks, "The total number of parquet column chunks materialized from a single value in their min/max statistics, without reading their data pages", ValueType::Number) \
+    M(ParquetConstantColumnSubchunks, "The total number of parquet column subchunks (per row subgroup) materialized from a single value in their per-page column-index statistics, without decoding their data pages", ValueType::Number) \
     M(ParquetDecodingTasks, "Tasks issued by parquet reader", ValueType::Number) \
     M(ParquetDecodingTaskBatches, "Task groups sent to a thread pool by parquet reader", ValueType::Number) \
     M(ParquetPrefetcherReadRandomRead, "The total number of reads with ReadMode::RandomRead by DB::Parquet::Prefetcher", ValueType::Number) \

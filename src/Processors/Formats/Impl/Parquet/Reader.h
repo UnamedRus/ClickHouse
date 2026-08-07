@@ -309,6 +309,19 @@ struct Reader
         /// records every row in block_missing_values (the plain constant case has no nulls).
         bool is_all_null = false;
 
+        /// Per-page constant info from the Column Index (tier 2; see applyColumnIndex and
+        /// detectConstantSubchunk). Populated only when the column index is loaded, indexed by data
+        /// page. `value` is in the output (post-cast) domain. Empty when unavailable. For truncatable
+        /// physical types (BYTE_ARRAY / FIXED_LEN_BYTE_ARRAY) only `all_null` is trusted, never
+        /// `is_const` (the Column Index has no per-page exactness flag).
+        struct PageConstInfo
+        {
+            bool is_const = false; /// page holds a single non-null value
+            bool all_null = false; /// page is entirely null
+            Field value;           /// the value when is_const
+        };
+        std::vector<PageConstInfo> page_const_info;
+
         /// Prefetches.
         /// TODO [parquet]: Check that all handles and tokens are reset after correct stages.
         PrefetchHandle bloom_filter_header_prefetch;
@@ -540,6 +553,20 @@ struct Reader
     /// Only applies to flat, top-level primitive columns; see the implementation for the exact
     /// conditions.
     void detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info) const;
+
+    /// Shared eligibility gate for constant-column materialization (both tiers): the setting is on,
+    /// stats are decodable, and the leaf is a flat top-level primitive output column.
+    bool constColumnMaterializationEligible(const PrimitiveColumnInfo & column_info) const;
+
+    /// Tier 2 (per row subgroup): using the retained per-page Column Index info
+    /// (ColumnChunk::page_const_info), decide whether `column` is constant over the row range
+    /// [start_row, end_row) covered by a subgroup. Returns true and sets out_all_null / out_value
+    /// when every overlapping page is all-null, or every overlapping page holds the same single
+    /// value. row_group_num_rows is the row group's total row count (for the last page's end).
+    bool detectConstantSubchunk(
+        const ColumnChunk & column, const PrimitiveColumnInfo & column_info,
+        size_t start_row, size_t end_row, size_t row_group_num_rows,
+        bool & out_all_null, Field & out_value) const;
 
     /// Returns mutable column because some of the recursive calls require it,
     /// e.g. ColumnArray::create does assumeMutable() on the nested columns.

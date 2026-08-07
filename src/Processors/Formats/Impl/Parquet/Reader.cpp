@@ -42,6 +42,7 @@ namespace ProfileEvents
     extern const Event ParquetRowsFilterExpression;
     extern const Event ParquetColumnsFilterExpression;
     extern const Event ParquetConstantColumnChunks;
+    extern const Event ParquetConstantColumnSubchunks;
 }
 
 namespace DB::Parquet
@@ -970,6 +971,18 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
             (column_index.__isset.null_counts && column_index.null_counts.size() != num_pages))
             throw Exception(ErrorCodes::INCORRECT_DATA, "Unexpected number of pages: {} null_pages, {} null_counts, {} min_values, {} max_values, {} pages in offset index", column_index.null_pages.size(), column_index.null_counts.size(), column_index.min_values.size(), column_index.max_values.size(), num_pages);
 
+        /// Tier 2 constant-column detection: retain per-page constant info from the Column Index for
+        /// use by detectConstantSubchunk. Only when eligible and the whole chunk is not already
+        /// constant (tier 1). For truncatable physical types the Column Index has no per-page
+        /// exactness flag, so a per-page min == max is untrustworthy: record only `all_null` there.
+        const bool record_page_const =
+            constColumnMaterializationEligible(column_info) && !column.is_constant;
+        const bool may_be_truncated =
+            column.meta->meta_data.type == parq::Type::BYTE_ARRAY
+            || column.meta->meta_data.type == parq::Type::FIXED_LEN_BYTE_ARRAY;
+        if (record_page_const)
+            column.page_const_info.assign(num_pages, ColumnChunk::PageConstInfo{});
+
         Hyperrectangle hyperrectangle(extended_sample_block.columns(), Range::createWholeUniverse());
         size_t prev_row_idx = 0; // start of the latest range of rows that pass filter
         for (size_t page_idx = 0; page_idx < num_pages; ++page_idx)
@@ -979,6 +992,9 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
 
             bool always_null = !column_index.null_pages.empty() && column_index.null_pages[page_idx];
             bool can_be_null = !column_index.__isset.null_counts || column_index.null_counts[page_idx] != 0;
+
+            if (record_page_const)
+                column.page_const_info[page_idx].all_null = always_null;
 
             if (nullable && always_null)
             {
@@ -992,6 +1008,16 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
             {
                 column_info.decoder.decodeField(column_index.min_values[page_idx], /*is_max=*/ false, range.left);
                 column_info.decoder.decodeField(column_index.max_values[page_idx], /*is_max=*/ true, range.right);
+
+                /// A page with no nulls whose decoded min == max holds a single value (post-cast
+                /// output domain, like tier 1). Captured before adjustRangeFromIndexIfNeeded, which
+                /// mutates the range for null/default handling.
+                if (record_page_const && !may_be_truncated && !can_be_null
+                    && !range.left.isNull() && range.left == range.right)
+                {
+                    column.page_const_info[page_idx].is_const = true;
+                    column.page_const_info[page_idx].value = range.left;
+                }
 
                 adjustRangeFromIndexIfNeeded(range, column_info, can_be_null);
             }
@@ -1162,6 +1188,34 @@ void Reader::intersectColumnIndexResultsAndInitSubgroups(RowGroup & row_group)
             }
             if (options.format.defaults_for_omitted_fields)
                 row_subgroup.block_missing_values.init(sample_block->columns());
+
+            /// Tier 2 constant detection: for each primitive column not already whole-chunk-constant
+            /// (tier 1), check whether it is constant over this subgroup's row range using the
+            /// per-page Column Index info retained in applyColumnIndex. If so, mark the subchunk so
+            /// decodePrimitiveColumn skips decoding it and formOutputColumn materializes a ColumnConst.
+            /// The subgroup's pages are still skipped forward by the next subgroup's
+            /// skipToRowOrNextPage; skipping the prefetch itself is a separate follow-up.
+            if (row_group.need_to_process)
+            {
+                for (size_t i = 0; i < primitive_columns.size(); ++i)
+                {
+                    ColumnChunk & column = row_group.columns[i];
+                    if (column.is_constant)
+                        continue; // tier 1 already materializes the whole chunk
+                    bool all_null = false;
+                    Field value;
+                    if (detectConstantSubchunk(
+                            column, primitive_columns[i], substart, subend,
+                            size_t(row_group.meta->num_rows), all_null, value))
+                    {
+                        ColumnSubchunk & subchunk = row_subgroup.columns[i];
+                        subchunk.is_constant = true;
+                        subchunk.is_all_null = all_null;
+                        subchunk.constant_value = std::move(value);
+                        ProfileEvents::increment(ProfileEvents::ParquetConstantColumnSubchunks);
+                    }
+                }
+            }
         }
     }
     row_group.intersected_row_ranges_after_column_index = std::move(row_ranges);
@@ -1342,13 +1396,13 @@ double Reader::estimateColumnMemoryBytesPerRow(const ColumnChunk & column, const
     return res;
 }
 
-void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info) const
+bool Reader::constColumnMaterializationEligible(const PrimitiveColumnInfo & column_info) const
 {
     if (!options.format.parquet.use_constant_column_optimization)
-        return;
-    /// We rely on column chunk min/max statistics being both present and decodable.
+        return false;
+    /// We rely on min/max statistics being both present and decodable.
     if (!column_info.decoder.allow_stats)
-        return;
+        return false;
 
     /// Only flat, top-level primitive columns, so that one parquet value maps 1:1 to one output row
     /// and formOutputColumn can materialize the value directly. Exclude:
@@ -1356,13 +1410,20 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
     ///  - leaves nested inside a Tuple/Map/Array output column (the output column is not primitive;
     ///    this also covers physically-nullable structs, whose leaves are not primitive outputs).
     /// A plain Nullable(T) is fine: it adds a definition level but no repetition, and its output
-    /// column is still primitive; the no-nulls check below and the output_nullable wrap handle it.
+    /// column is still primitive; the no-nulls check and the output_nullable wrap handle it.
     if (column_info.levels.back().rep != 0 || column_info.max_array_def != 0)
-        return;
+        return false;
     if (column_info.idx_in_output_block >= sample_block_to_output_columns_idx.size())
-        return;
+        return false;
     const auto & output_idx = sample_block_to_output_columns_idx.at(column_info.idx_in_output_block);
     if (!output_idx.has_value() || !output_columns[output_idx.value()].is_primitive)
+        return false;
+    return true;
+}
+
+void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info) const
+{
+    if (!constColumnMaterializationEligible(column_info))
         return;
 
     const auto & meta_data = column.meta->meta_data;
@@ -1431,20 +1492,102 @@ void Reader::detectConstantColumn(ColumnChunk & column, const PrimitiveColumnInf
     ProfileEvents::increment(ProfileEvents::ParquetConstantColumnChunks);
 }
 
+bool Reader::detectConstantSubchunk(
+    const ColumnChunk & column, const PrimitiveColumnInfo & column_info,
+    size_t start_row, size_t end_row, size_t row_group_num_rows,
+    bool & out_all_null, Field & out_value) const
+{
+    if (column.page_const_info.empty())
+        return false;
+    const size_t num_pages = column.offset_index.page_locations.size();
+    if (num_pages == 0 || column.page_const_info.size() != num_pages)
+        return false;
+
+    bool any = false;
+    bool all_pages_null = true;
+    bool all_pages_const_same = true;
+    Field value;
+    bool value_set = false;
+
+    for (size_t p = 0; p < num_pages; ++p)
+    {
+        const size_t p_start = static_cast<size_t>(column.offset_index.page_locations[p].first_row_index);
+        const size_t p_end = (p + 1 < num_pages)
+            ? static_cast<size_t>(column.offset_index.page_locations[p + 1].first_row_index)
+            : row_group_num_rows;
+        if (p_end <= start_row || p_start >= end_row)
+            continue; // page does not overlap the subgroup's row range
+
+        any = true;
+        const auto & pci = column.page_const_info[p];
+        if (!pci.all_null)
+            all_pages_null = false;
+        if (pci.is_const)
+        {
+            if (!value_set)
+            {
+                value = pci.value;
+                value_set = true;
+            }
+            else if (value != pci.value)
+                all_pages_const_same = false;
+        }
+        else
+        {
+            all_pages_const_same = false;
+        }
+    }
+
+    if (!any)
+        return false;
+
+    if (all_pages_null)
+    {
+        /// Every overlapping page is entirely null - mirror detectConstantColumn's all-null branch.
+        const bool null_as_default = options.format.null_as_default && !column_info.output_nullable;
+        if (column_info.output_nullable)
+            out_value = Null{};
+        else if (null_as_default)
+            out_value = column_info.output_type->getDefault();
+        else
+            return false; // non-nullable output without null substitution: let normal decode error
+        out_all_null = true;
+        return true;
+    }
+
+    if (all_pages_const_same && value_set)
+    {
+        out_all_null = false;
+        out_value = value;
+        return true;
+    }
+
+    return false;
+}
+
 void Reader::decodePrimitiveColumn(ColumnChunk & column, const PrimitiveColumnInfo & column_info, ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup, MemoryUsageDiff & diff)
 {
-    if (column.is_constant)
+    /// subchunk.is_constant is set either here from column.is_constant (tier 1, whole chunk) or
+    /// during subgroup init by detectConstantSubchunk (tier 2, this row subgroup). Either way we skip
+    /// decoding and let formOutputColumn materialize the value as a ColumnConst.
+    if (column.is_constant && !subchunk.is_constant)
     {
-        /// This chunk provably holds a single value in every row (see detectConstantColumn), and its
-        /// data pages were never fetched. Skip all decoding and hand the already-decoded value to
-        /// formOutputColumn, which materializes it directly in the final output type. The value is
-        /// in the output (post-cast) domain, so it must not go through the decoded_type column and
-        /// castColumn path. We still run the per-output-column bookkeeping below so the output column
-        /// is formed once the last of its primitive columns is done.
         subchunk.is_constant = true;
         subchunk.constant_value = column.constant_value;
         subchunk.is_all_null = column.is_all_null;
+    }
 
+    if (subchunk.is_constant)
+    {
+        /// This subchunk provably holds a single value in every row - either the whole chunk (tier 1,
+        /// detectConstantColumn; its data pages were never fetched) or just this subgroup's row range
+        /// (tier 2, detectConstantSubchunk; the pages are skipped forward by the next subgroup's
+        /// skipToRowOrNextPage). Skip decoding and hand the value to formOutputColumn, which
+        /// materializes it directly in the final output type. The value is in the output (post-cast)
+        /// domain, so it must not go through the decoded_type column and castColumn path. We still run
+        /// the per-output-column bookkeeping below so the output column is formed once the last of its
+        /// primitive columns is done. (The subchunk fields were set above for tier 1, or during
+        /// subgroup init for tier 2.)
         OutputColumnState & state = row_subgroup.output.at(column_info.idx_in_output_block);
         chassert(!state.column);
         size_t prev_count = state.primitive_columns_remaining.fetch_sub(1);
