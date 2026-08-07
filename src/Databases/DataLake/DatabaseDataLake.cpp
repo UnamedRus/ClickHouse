@@ -66,6 +66,7 @@ namespace DatabaseDataLakeSetting
     extern const DatabaseDataLakeSettingsString aws_access_key_id;
     extern const DatabaseDataLakeSettingsString aws_secret_access_key;
     extern const DatabaseDataLakeSettingsString region;
+    extern const DatabaseDataLakeSettingsString namespaces;
     extern const DatabaseDataLakeSettingsString aws_role_arn;
     extern const DatabaseDataLakeSettingsString aws_role_session_name;
     extern const DatabaseDataLakeSettingsString aws_external_id;
@@ -178,6 +179,7 @@ void DatabaseDataLake::initialize() const
         .aws_access_key_id = settings[DatabaseDataLakeSetting::aws_access_key_id].value,
         .aws_secret_access_key = settings[DatabaseDataLakeSetting::aws_secret_access_key].value,
         .region = settings[DatabaseDataLakeSetting::region].value,
+        .namespaces = settings[DatabaseDataLakeSetting::namespaces].value,
         .aws_role_arn = settings[DatabaseDataLakeSetting::aws_role_arn].value,
         .aws_role_session_name = settings[DatabaseDataLakeSetting::aws_role_session_name].value,
         .aws_external_id = settings[DatabaseDataLakeSetting::aws_external_id].value,
@@ -195,6 +197,7 @@ void DatabaseDataLake::initialize() const
                 settings[DatabaseDataLakeSetting::auth_header],
                 settings[DatabaseDataLakeSetting::oauth_server_uri].value,
                 settings[DatabaseDataLakeSetting::oauth_server_use_request_body].value,
+                settings[DatabaseDataLakeSetting::namespaces].value,
                 Context::getGlobalContextInstance());
             break;
         }
@@ -248,6 +251,7 @@ void DatabaseDataLake::initialize() const
                 settings[DatabaseDataLakeSetting::warehouse].value,
                 url,
                 settings[DatabaseDataLakeSetting::catalog_credential].value,
+                settings[DatabaseDataLakeSetting::namespaces].value,
                 Context::getGlobalContextInstance());
             break;
         }
