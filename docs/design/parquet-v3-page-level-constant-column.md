@@ -87,5 +87,7 @@ subgroup: `fillConstantPagesAndDecodeRest` fills single-value pages from the Col
 only the varying ones, and `determinePagesToPrefetch` skips prefetching the filled pages (a page
 shared with a subgroup that decodes it normally is still fetched — `willFillConstantPages` is
 deterministic so both paths agree). Gated to: no cast on the output value, no predicate on the
-column, no prewhere/row-level filter, and no all-null pages in the subgroup. Experimental, off by
-default; needs a build + correctness tests before it can be trusted.
+column, no prewhere/row-level filter. All-null pages are handled (filled with nulls via the compact
+values + null map + `expand` path, or the output default under `null_as_default`); a subgroup with
+an all-null page only falls back when the output can represent neither null nor a default.
+Experimental, off by default; needs a build + correctness tests before it can be trusted.

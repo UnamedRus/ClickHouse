@@ -1360,7 +1360,8 @@ void Reader::determinePagesToPrefetch(ColumnChunk & column, const ColumnSubchunk
         if (passes_filter && fill_const_pages)
         {
             const size_t gid = size_t(page.meta - column.offset_index.page_locations.data());
-            if (gid < column.page_const_info.size() && column.page_const_info[gid].is_const)
+            if (gid < column.page_const_info.size()
+                && (column.page_const_info[gid].is_const || column.page_const_info[gid].all_null))
                 passes_filter = false;
         }
 
@@ -1632,12 +1633,15 @@ bool Reader::willFillConstantPages(
     if (num_pages == 0 || column.page_const_info.size() != num_pages)
         return false;
 
-    /// Require at least one single-value page and no all-null page overlapping the subgroup (all-null
-    /// pages are not handled by the fill; fall back to the standard decode for those subgroups).
+    /// Require at least one fillable page (single-value or all-null) overlapping the subgroup. An
+    /// all-null page is only representable when the output is Nullable or null_as_default substitutes
+    /// a default; otherwise fall back to the standard decode (which raises the usual not-null error).
+    const bool null_as_default = options.format.null_as_default && !column_info.output_nullable;
+    const bool nulls_representable = column_info.output_nullable || null_as_default;
     const size_t start = row_subgroup.start_row_idx;
     const size_t end = start + row_subgroup.filter.rows_total;
     const size_t rg_rows = size_t(row_group.meta->num_rows);
-    bool any_const = false;
+    bool any_fillable = false;
     for (size_t p = 0; p < num_pages; ++p)
     {
         const size_t p_start = size_t(pages[p].first_row_index);
@@ -1645,12 +1649,12 @@ bool Reader::willFillConstantPages(
         if (p_end <= start || p_start >= end)
             continue;
         const auto & pci = column.page_const_info[p];
-        if (pci.all_null)
+        if (pci.all_null && !nulls_representable)
             return false;
-        if (pci.is_const)
-            any_const = true;
+        if (pci.is_const || pci.all_null)
+            any_fillable = true;
     }
-    return any_const;
+    return any_fillable;
 }
 
 void Reader::fillConstantPagesAndDecodeRest(
@@ -1690,6 +1694,15 @@ void Reader::fillConstantPagesAndDecodeRest(
             subchunk.column->insertMany(pci.value, count);
             if (null_map_data)
                 null_map_data->resize_fill(null_map_data->size() + count, 0);
+        }
+        else if (pci.all_null)
+        {
+            /// All-null page: append no non-null values (the column holds the compact non-null
+            /// values); mark every row null. The caller's tail expand()s defaults into these
+            /// positions and applies the Nullable wrap / null_as_default handling, exactly as the
+            /// normal decode does. null_map exists here (an all-null page implies need_null_map).
+            chassert(null_map_data);
+            null_map_data->resize_fill(null_map_data->size() + count, 1);
         }
         else
         {
