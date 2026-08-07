@@ -604,8 +604,18 @@ void Reader::initializePrefetches()
             /// nor the column index nor the data pages. The row group already passed the key
             /// condition via its min == max hyperrectangle, so page-level pruning is redundant here.
 
+            /// Force-load the column index (per-page stats) for an eligible column even without a
+            /// predicate on it, so tier-2 constant detection (detectConstantSubchunk) can run. Gated
+            /// by input_format_parquet_use_column_index_for_constant_columns. Requires the offset
+            /// index too (page -> row mapping), loaded just below.
+            const bool force_column_index_for_const =
+                options.format.parquet.use_column_index_for_constant_columns
+                && !column.is_constant
+                && constColumnMaterializationEligible(primitive_columns[column_idx])
+                && column.meta->__isset.column_index_offset && column.meta->__isset.column_index_length;
+
             /// Offset index.
-            if (use_offset_index && !column.is_constant &&
+            if ((use_offset_index || force_column_index_for_const) && !column.is_constant &&
                 column.meta->__isset.offset_index_offset && column.meta->__isset.offset_index_length)
             {
                 column.offset_index_prefetch = prefetcher.registerRange(
@@ -615,7 +625,7 @@ void Reader::initializePrefetches()
 
             /// Column index.
             column.use_column_index = !column.is_constant
-                && primitive_columns[column_idx].column_index_condition
+                && (primitive_columns[column_idx].column_index_condition || force_column_index_for_const)
                 && column.offset_index_prefetch
                 && column.meta->__isset.column_index_offset && column.meta->__isset.column_index_length;
             if (column.use_column_index)
@@ -957,7 +967,9 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
     try
     {
         chassert(column.use_column_index);
-        chassert(column_info.column_index_condition);
+        /// column_index_condition may be null when the column index was force-loaded only for tier-2
+        /// constant detection (input_format_parquet_use_column_index_for_constant_columns); in that
+        /// case we record per-page constant info below but do no page-level predicate pruning.
 
         auto data = prefetcher.getRangeData(column.column_index_prefetch);
         parq::ColumnIndex column_index;
@@ -1022,17 +1034,23 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
                 adjustRangeFromIndexIfNeeded(range, column_info, can_be_null);
             }
 
-            bool passes_filter = column_info.column_index_condition->checkInHyperrectangle(
-                hyperrectangle, extended_sample_block_data_types).can_be_true;
-
-            if (!passes_filter)
+            /// Page-level predicate pruning only when this column has a condition. When the index was
+            /// force-loaded solely for constant detection, prev_row_idx stays 0 and the whole chunk is
+            /// selected (the final range below), i.e. no restriction.
+            if (column_info.column_index_condition)
             {
-                size_t start_row = column.offset_index.page_locations[page_idx].first_row_index;
-                size_t end_row = page_idx + 1 < num_pages ? column.offset_index.page_locations[page_idx + 1].first_row_index : row_group.meta->num_rows;
-                chassert(end_row > start_row); // validated in decodeOffsetIndex
-                if (start_row > prev_row_idx)
-                    column.row_ranges_after_column_index.emplace_back(prev_row_idx, start_row);
-                prev_row_idx = end_row;
+                bool passes_filter = column_info.column_index_condition->checkInHyperrectangle(
+                    hyperrectangle, extended_sample_block_data_types).can_be_true;
+
+                if (!passes_filter)
+                {
+                    size_t start_row = column.offset_index.page_locations[page_idx].first_row_index;
+                    size_t end_row = page_idx + 1 < num_pages ? column.offset_index.page_locations[page_idx + 1].first_row_index : row_group.meta->num_rows;
+                    chassert(end_row > start_row); // validated in decodeOffsetIndex
+                    if (start_row > prev_row_idx)
+                        column.row_ranges_after_column_index.emplace_back(prev_row_idx, start_row);
+                    prev_row_idx = end_row;
+                }
             }
         }
 

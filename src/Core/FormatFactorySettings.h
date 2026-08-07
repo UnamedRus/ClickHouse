@@ -210,6 +210,9 @@ Minor tweak to how pages are read from parquet file when no page filtering is us
     DECLARE(Bool, input_format_parquet_use_constant_column_optimization, true, R"(
 When a Parquet column chunk provably holds a single value in every row (according to its min/max statistics), materialize that value directly instead of reading and decoding the column's data pages.
 )", 0) \
+    DECLARE(Bool, input_format_parquet_use_column_index_for_constant_columns, false, R"(
+Load the Parquet Column Index for read columns that have no predicate of their own, so the constant-column optimization can also skip data pages that are single-valued over a row subgroup (not just over a whole column chunk). Costs a small extra read of the (tiny) Column Index; only worthwhile when columns are sorted or low-cardinality. Applies only when `input_format_parquet_use_constant_column_optimization` is enabled.
+)", 0) \
     DECLARE(Double, input_format_parquet_prefetch_bandwidth_hide_seconds, 0, R"(
 Read back-pressure for the Parquet v3 reader. When greater than zero, stop prefetching more compressed data pages ahead of decoding once the in-flight compressed bytes exceed this many seconds' worth of the measured read throughput (i.e. once the storage link is kept busy). Prevents buffering compressed data far beyond what bandwidth can consume. 0 disables the back-pressure (compressed prefetch is then bounded only by its memory budget).
 )", 0) \

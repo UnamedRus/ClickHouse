@@ -56,11 +56,23 @@ page overlapping the subgroup's row range is constant with the *same* value (or 
 - **Phase 5** — ProfileEvents comparison on clustered data: expect further `S3GetObject` /
   `ParquetFetchWaitTimeMicroseconds` drops with chunk count unchanged.
 
+## Optional force-load
+
+By default tier 2 only uses the Column Index when it is already loaded (columns with a predicate
+push-down). `input_format_parquet_use_column_index_for_constant_columns` (default off) extends it:
+the Column Index (+ Offset Index) is force-loaded for eligible read columns that have no predicate,
+so tier 2 can also fire on them. Cost is a small extra read of the (tiny, tail-contiguous, coalesced)
+index; worthwhile mainly for sorted / low-cardinality columns. `applyColumnIndex` records per-page
+constant info but skips predicate pruning when the column has no condition. A future `auto` mode
+could gate this on footer signals (row-group `sorting_columns`, low compressed-bytes-per-value,
+dictionary encoding stats) instead of an all-or-nothing switch.
+
 ## Guardrails
 
 - Fixed-width numeric/date/time only (truncation).
-- Reuse the Column Index only when already loaded; never force-fetch it just for this.
-- Gate on the existing `input_format_parquet_use_constant_column_optimization` setting.
+- Gate on the existing `input_format_parquet_use_constant_column_optimization` setting; the
+  force-load above is additionally gated by
+  `input_format_parquet_use_column_index_for_constant_columns`.
 - Partial-page subgroup boundaries are fine: a partial overlap of a constant page still yields that
   value, as long as every overlapping page is constant with the shared value.
 

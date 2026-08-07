@@ -43,6 +43,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         {
             {"input_format_parquet_use_constant_column_optimization", false, true, "New setting: when a Parquet column chunk provably holds a single value in every row (per its min/max statistics), materialize that value directly instead of reading and decoding the column's data pages (reader v3)."},
             {"input_format_parquet_prefetch_bandwidth_hide_seconds", 0, 0, "New setting: read back-pressure for the Parquet v3 reader; stop prefetching compressed data pages once in-flight compressed bytes exceed this many seconds of measured read throughput. 0 (the default and the pre-existing behavior) disables the back-pressure."},
+            {"input_format_parquet_use_column_index_for_constant_columns", false, false, "New setting: load the Parquet Column Index for read columns without a predicate so the constant-column optimization can skip data pages that are single-valued over a row subgroup. Disabled by default (costs a small extra read)."},
             {"analyzer_compatibility_allow_non_aggregate_in_having", false, false, "New compatibility setting. When enabled, the new analyzer mimics the legacy `HAVING`-to-`WHERE` rewrite for non-aggregate AND-conjuncts instead of raising `NOT_AN_AGGREGATE`."},
             {"reserve_memory", 0, 0, "New setting to reserve memory for specific workload before starting a query."},
             {"output_format_image_width", 1024, 1024, "New setting controlling the width of the output image for image output formats such as PNG."},
