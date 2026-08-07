@@ -63,6 +63,14 @@ public:
     /// Pass-through read from the underlying ReadBuffer.
     void readSync(char * to, size_t n, size_t offset);
 
+    /// Retain a tail chunk of the file (the bytes already read to parse the footer) so that any
+    /// range subsequently registered and fully contained in it - notably the Column Index and
+    /// Offset Index, which live just below the FileMetaData footer - is served from this in-memory
+    /// copy instead of issuing another read. No-op for EntireFileIsInMemory (nothing to save) and
+    /// when the chunk is empty. `data` points at `length` bytes representing file offsets
+    /// [file_offset, file_offset + length).
+    void retainTail(const char * data, size_t length, size_t file_offset);
+
     size_t getFileSize() const { return file_size; }
 
     /// Average completed-read throughput (bytes/sec) since init, or 0 if not enough has been read to
@@ -184,6 +192,13 @@ private:
     size_t file_size{};
     size_t min_bytes_for_seek{};
     size_t bytes_per_read_task{};
+
+    /// Tail chunk retained by retainTail() to serve fully-contained ranges (Column/Offset Index)
+    /// without a second read. Written once before any prefetching, read-only afterwards.
+    /// [retained_tail_start, retained_tail_end) are file offsets; empty range == nothing retained.
+    PaddedPODArray<char> retained_tail;
+    size_t retained_tail_start = 0;
+    size_t retained_tail_end = 0;
 
     /// Total bytes read by completed tasks, and when reading started, for throughput estimation.
     std::atomic<size_t> total_bytes_read{0};

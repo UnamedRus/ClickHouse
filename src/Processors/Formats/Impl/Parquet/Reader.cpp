@@ -214,6 +214,13 @@ parq::FileMetaData Reader::readFileMetaData(Prefetcher & prefetcher, size_t foot
     if (memcmp(buf.data() + initial_read_size - 4, "PAR1", 4) != 0)
         throw Exception(ErrorCodes::INCORRECT_DATA, "Not a Parquet file (wrong magic bytes at the end of file)");
 
+    /// The tail we just read also covers the Column Index / Offset Index (they sit just below the
+    /// FileMetaData footer). Retain it so those ranges are served from memory rather than re-read.
+    /// Retain the original tail bytes now, before the (rare) oversized-footer branch below mutates
+    /// `buf`. Especially effective together with footer_size_hint, which widens this read to span
+    /// the whole footer + index region of wide / many-row-group files.
+    prefetcher.retainTail(buf.data(), initial_read_size, file_size - initial_read_size);
+
     int32_t metadata_size_i32 = 0;
     memcpy(&metadata_size_i32, buf.data() + initial_read_size - 8, 4);
     if (metadata_size_i32 <= 0 || size_t(metadata_size_i32) + 8 > file_size)

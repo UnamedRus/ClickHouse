@@ -22,6 +22,7 @@ namespace ProfileEvents
     extern const Event ParquetPrefetcherReadRandomRead;
     extern const Event ParquetPrefetcherReadSeekAndRead;
     extern const Event ParquetPrefetcherReadEntireFile;
+    extern const Event ParquetPrefetcherServedFromRetainedTail;
 }
 
 namespace DB::Parquet
@@ -134,6 +135,19 @@ void Prefetcher::readSync(char * to, size_t n, size_t offset)
     }
     if (nread != n)
         throw Exception(ErrorCodes::INCORRECT_DATA, "Unexpected eof: offset {}, length {}, bytes read {}, expected file size {}", offset, n, nread, file_size);
+}
+
+void Prefetcher::retainTail(const char * data, size_t length, size_t file_offset)
+{
+    /// Nothing to save when the whole file is already in memory (getRangeData copies from
+    /// entire_file, no read is issued). Only the read-issuing modes benefit.
+    if (read_mode == ReadMode::EntireFileIsInMemory || length == 0)
+        return;
+    chassert(!ranges_finalized.load(std::memory_order_relaxed));
+    chassert(file_offset + length <= file_size);
+    retained_tail.assign(data, data + length);
+    retained_tail_start = file_offset;
+    retained_tail_end = file_offset + length;
 }
 
 PrefetchHandle Prefetcher::registerRange(size_t offset, size_t length, bool likely_to_be_used)
@@ -310,6 +324,36 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
     {
         start_offset = ranges[range_idx].start;
         end_offset = ranges[range_idx].end;
+    }
+
+    /// If this range is fully contained in the retained footer tail, serve it directly from that
+    /// in-memory copy - no read, no coalescing. Build a one-off Task already in the Done state whose
+    /// cached_region points into `retained_tail`; getRangeData's zero-copy path then returns the
+    /// span. This eliminates the redundant Column/Offset Index read (their bytes were already
+    /// fetched for the footer). `retained_tail` outlives all handles (it is a Prefetcher member), so
+    /// the region needs no keep-alive handle.
+    if (retained_tail_end > retained_tail_start
+        && start_offset >= retained_tail_start && end_offset <= retained_tail_end)
+    {
+        Task & task = tasks.emplace_back();
+        task.offset = start_offset;
+        task.length = end_offset - start_offset;
+        task.memory_amplification = 1;
+        task.refcount.store(1);
+        task.state.store(Task::State::Done);
+        task.cached_region = Task::CachedReadRegion{
+            .handle = {},
+            .data = retained_tail.data() + (start_offset - retained_tail_start),
+            .size = end_offset - start_offset,
+            .file_offset = start_offset};
+
+        initial_req->task = &task;
+        initial_req->task_offset = 0;
+        RequestState::State s = RequestState::State::HasRange;
+        bool ok = initial_req->state.compare_exchange_strong(s, RequestState::State::HasTask);
+        chassert(ok); // we hold a PrefetchHandle, so it cannot be Cancelled here
+        ProfileEvents::increment(ProfileEvents::ParquetPrefetcherServedFromRetainedTail);
+        return; // lock released by unique_lock destructor; task is already Done, nothing to schedule
     }
 
     /// Try to extend the task's range in both directions to cover more request ranges, as long
