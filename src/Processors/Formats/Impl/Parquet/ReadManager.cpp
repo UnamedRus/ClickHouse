@@ -797,7 +797,7 @@ void ReadManager::scheduleTask(Task task, bool is_first_in_group, MemoryUsageDif
                 /// pool and charges the compressed bytes to the ColumnDataPrefetch stage budget -
                 /// separate from the decoded-output budget (ColumnData) - so many row groups can have
                 /// their reads in flight (deep prefetch) while only a few are decoded at once.
-                reader.determinePagesToPrefetch(column, row_subgroup, row_group, prefetches);
+                reader.determinePagesToPrefetch(column, row_subgroup.columns.at(task.column_idx), row_subgroup, row_group, prefetches);
 
                 /// Side note: would be nice to avoid reading the dictionary if all dictionary-encoded
                 /// pages were filtered out (e.g. if it's a 100 MB column chunk with unique long strings,

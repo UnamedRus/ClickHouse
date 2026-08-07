@@ -1254,7 +1254,7 @@ void Reader::decodeOffsetIndex(ColumnChunk & column, const RowGroup & row_group)
     }
 }
 
-void Reader::determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out)
+void Reader::determinePagesToPrefetch(ColumnChunk & column, const ColumnSubchunk & subchunk, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out)
 {
     chassert(row_subgroup.filter.rows_pass > 0);
     if (column.is_constant)
@@ -1322,6 +1322,15 @@ void Reader::determinePagesToPrefetch(ColumnChunk & column, const RowSubgroup & 
         bool passes_filter = row_subgroup.filter.rows_pass > 0 && end_row_idx > start_row_idx;
         if (passes_filter && row_subgroup.filter.rows_pass < row_subgroup.filter.rows_total)
             passes_filter = !memoryIsZero(row_subgroup.filter.filter.data(), start_row_idx - row_subgroup.start_row_idx, end_row_idx - row_subgroup.start_row_idx);
+
+        /// Tier 2: this subgroup's column is constant (detectConstantSubchunk), so it decodes nothing
+        /// and needs no pages. Treat every page as not-needed-by-this-subgroup; a page fully inside
+        /// this subgroup is then released below (never fetched), while a page shared with a
+        /// neighbouring non-constant subgroup is left for that subgroup to claim. Safe because a
+        /// constant subgroup never calls skipToRowOrNextPage, and non-constant subgroups jump
+        /// directly to their own (claimed) pages via the offset index.
+        if (subchunk.is_constant)
+            passes_filter = false;
 
         if (passes_filter)
             out.push_back(&page.prefetch); // this subgroup needs this page
