@@ -1613,10 +1613,11 @@ bool Reader::willFillConstantPages(
         return false; // whole chunk already constant (tier 1)
     if (column.page_const_info.empty())
         return false; // no Column Index info retained
-    if (column_info.column_index_condition)
-        return false; // a predicate on this column may have pruned pages; keep the standard path
     if (format_filter_info && (format_filter_info->prewhere_info || format_filter_info->row_level_filter))
         return false; // a prewhere/row-level filter would make rows_pass < rows_total at decode time
+    /// A page-pruning predicate on this column (column_index_condition without prewhere) is fine:
+    /// pruned pages fall outside every subgroup's contiguous surviving row range, so the fill never
+    /// walks them, and the prefetch-skip indexes page_const_info by each page's global position.
     if (!constColumnMaterializationEligible(column_info))
         return false;
     if (row_subgroup.filter.rows_pass != row_subgroup.filter.rows_total)
