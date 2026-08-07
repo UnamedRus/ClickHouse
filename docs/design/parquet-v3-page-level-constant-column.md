@@ -67,6 +67,18 @@ constant info but skips predicate pruning when the column has no condition. A fu
 could gate this on footer signals (row-group `sorting_columns`, low compressed-bytes-per-value,
 dictionary encoding stats) instead of an all-or-nothing switch.
 
+## Cast safety (future-proofing)
+
+The optimization only fires when the stats decoder needs no value-transforming conversion
+(`SchemaConverter` sets `allow_stats` accordingly), so today `input_type == output_type` for every
+constant column and no cast is applied. To keep the constant path correct if `allow_stats` is ever
+generalized to allow transforming casts, `formOutputColumn` builds the single-value constant in
+`input_type` and runs the same `castColumn` the per-row decode uses when `needs_cast` is set - a
+no-op today, O(1) on the `ColumnConst`, and it preserves const-ness. The all-null constant is
+synthesized directly in the output domain (Null / output default), so it is not cast. The mixed fill
+already goes through the normal `formOutputColumn` cast, so it is future-safe too. This does not
+touch the `allow_stats` decision itself.
+
 ## Guardrails
 
 - All types, including `BYTE_ARRAY` / `FIXED_LEN_BYTE_ARRAY` strings. No truncation guard is needed

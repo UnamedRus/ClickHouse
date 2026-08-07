@@ -2634,20 +2634,39 @@ MutableColumnPtr Reader::formOutputColumn(RowSubgroup & row_subgroup, size_t out
             /// so materialize it as a ColumnConst rather than an expanded column. This is O(1) instead
             /// of O(rows), and the const-ness propagates downstream: a PREWHERE/WHERE predicate
             /// computes its result from the value without expanding the stored column, and GROUP BY /
-            /// aggregation over this column get a const key. The value is already in the output
-            /// (post-cast) domain, so we skip the decoded_type column and the castColumn below.
-            MutableColumnPtr single_value = output_info.output_type->createColumn();
-            single_value->insert(subchunk.constant_value);
+            /// aggregation over this column get a const key.
+            ColumnPtr result;
+            if (subchunk.is_all_null)
+            {
+                /// constant_value was synthesized directly in the output domain (Null for a Nullable
+                /// output, or the output default under null_as_default), so no cast applies.
+                MutableColumnPtr single_value = output_info.output_type->createColumn();
+                single_value->insert(subchunk.constant_value);
+                result = ColumnConst::create(std::move(single_value), num_rows);
 
-            /// An all-null chunk must record every row in block_missing_values, matching the normal
-            /// decode path (which records nulls from the null map); needed for
-            /// input_format_null_as_default. The single-value case has no nulls, so records nothing.
-            if (subchunk.is_all_null
-                && output_info.idx_in_output_block.has_value()
-                && *output_info.idx_in_output_block < row_subgroup.block_missing_values.getNumColumns())
-                row_subgroup.block_missing_values.setBits(*output_info.idx_in_output_block, num_rows);
+                /// An all-null chunk must record every row in block_missing_values, matching the
+                /// normal decode path (which records nulls from the null map); needed for
+                /// input_format_null_as_default.
+                if (output_info.idx_in_output_block.has_value()
+                    && *output_info.idx_in_output_block < row_subgroup.block_missing_values.getNumColumns())
+                    row_subgroup.block_missing_values.setBits(*output_info.idx_in_output_block, num_rows);
+            }
+            else
+            {
+                /// The value came from decodeField, i.e. the decoded/input domain. Build the const in
+                /// input_type and apply the same castColumn the per-row decode uses when the output
+                /// type differs. Today the optimization only fires when the stats decoder does not
+                /// need a value-transforming conversion (input_type == output_type), so this cast is a
+                /// no-op; it is here so the constant path stays correct if that ever changes. Casting a
+                /// ColumnConst is O(1) (one value) and preserves const-ness.
+                MutableColumnPtr single_value = output_info.input_type->createColumn();
+                single_value->insert(subchunk.constant_value);
+                result = ColumnConst::create(std::move(single_value), num_rows);
+                if (output_info.needs_cast)
+                    result = castColumn({result, output_info.input_type, output_info.name}, output_info.output_type);
+            }
 
-            return ColumnConst::create(std::move(single_value), num_rows);
+            return IColumn::mutate(std::move(result));
         }
 
         res = std::move(subchunk.column);
