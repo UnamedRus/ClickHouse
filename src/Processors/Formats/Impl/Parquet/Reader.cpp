@@ -1004,7 +1004,12 @@ void Reader::applyColumnIndex(ColumnChunk & column, const PrimitiveColumnInfo & 
             range = Range::createWholeUniverse();
 
             bool always_null = !column_index.null_pages.empty() && column_index.null_pages[page_idx];
-            bool can_be_null = !column_index.__isset.null_counts || column_index.null_counts[page_idx] != 0;
+            /// A required column (max def level 0) can never contain nulls, regardless of whether the
+            /// Column Index carries null_counts. This matters for tier-2 constant detection below:
+            /// ClickHouse's own writer only emits null_counts for nullable columns (see Write.cpp,
+            /// has_null_count = max_def == 1), so without the `nullable` guard can_be_null would be
+            /// spuriously true for every required column and the is_const branch would never fire.
+            bool can_be_null = nullable && (!column_index.__isset.null_counts || column_index.null_counts[page_idx] != 0);
 
             if (record_page_const)
                 column.page_const_info[page_idx].all_null = always_null;
