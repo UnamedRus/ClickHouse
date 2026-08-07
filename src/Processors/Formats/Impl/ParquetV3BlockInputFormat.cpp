@@ -112,11 +112,11 @@ parquet::format::FileMetaData ParquetV3BlockInputFormat::getFileMetadata(Parquet
         String etag = object_with_metadata->metadata->etag;
         ParquetMetadataCacheKey cache_key = ParquetMetadataCache::createKey(file_name, etag);
         return metadata_cache->getOrSetMetadata(
-            cache_key, [&]() { return Parquet::Reader::readFileMetaData(prefetcher); });
+            cache_key, [&]() { return Parquet::Reader::readFileMetaData(prefetcher, read_options.footer_metadata_size_hint); });
     }
     else
     {
-        return Parquet::Reader::readFileMetaData(prefetcher);
+        return Parquet::Reader::readFileMetaData(prefetcher, read_options.footer_metadata_size_hint);
     }
 }
 
@@ -214,7 +214,7 @@ void NativeParquetSchemaReader::initializeIfNeeded()
         return;
     Parquet::Prefetcher prefetcher;
     prefetcher.init(&in, read_options, /*parser_shared_resources_=*/ nullptr);
-    file_metadata = Parquet::Reader::readFileMetaData(prefetcher);
+    file_metadata = Parquet::Reader::readFileMetaData(prefetcher, read_options.footer_metadata_size_hint);
     initialized = true;
 }
 

@@ -520,7 +520,9 @@ struct Reader
 
     void init(const ReadOptions & options_, const Block & sample_block_, FormatFilterInfoPtr format_filter_info_);
 
-    static parq::FileMetaData readFileMetaData(Prefetcher & prefetcher);
+    /// footer_size_hint: optional hint (bytes) for the initial tail read; 0 = default speculative
+    /// read (see ReadOptions::footer_metadata_size_hint / estimateParquetFooterSize).
+    static parq::FileMetaData readFileMetaData(Prefetcher & prefetcher, size_t footer_size_hint = 0);
     void prefilterAndInitRowGroups(const std::optional<std::unordered_set<UInt64>> & row_groups_to_read);
     void preparePrewhere();
 

@@ -3,6 +3,8 @@
 #include <Common/threadPoolCallbackRunner.h>
 #include <Formats/FormatSettings.h>
 
+#include <algorithm>
+
 namespace DB
 {
 struct FormatParserSharedResources;
@@ -36,7 +38,40 @@ struct ReadOptions
     /// probability becomes very high. E.g. if bloom filter has 1% false positive probability,
     /// searching for 100 elements would have 63% false positive probability.
     size_t bloom_filter_max_set_size = 100;
+
+    /// Hint (in bytes) for how much of the file tail to read when fetching the parquet footer
+    /// (FileMetaData). 0 = unknown -> use the default speculative 64 KiB read. A data lake that
+    /// already knows per-file stats (e.g. Iceberg: column count, row-group count from split_offsets,
+    /// and per-column bound sizes) can set this via estimateParquetFooterSize so the footer is
+    /// captured in a single read for wide / many-row-group files. Only affects read count, never
+    /// correctness: an undershoot falls back to a second read, an overshoot reads a slightly larger
+    /// (already-clamped) tail.
+    size_t footer_metadata_size_hint = 0;
 };
+
+/// Estimate the serialized size of a parquet FileMetaData footer, to size the initial tail read.
+///  - num_columns: number of leaf columns,
+///  - num_row_groups: number of row groups,
+///  - bounds_bytes: total bytes of the per-column min+max bounds for one file (e.g. summed from an
+///    Iceberg manifest's lower_bounds + upper_bounds); these repeat per row group in the footer.
+/// The result is clamped to a sane speculative-read range, so it is always safe to use directly as
+/// ReadOptions::footer_metadata_size_hint.
+inline size_t estimateParquetFooterSize(size_t num_columns, size_t num_row_groups, size_t bounds_bytes)
+{
+    /// Rough per-structure sizes of thrift-compact FileMetaData (see the constants' rationale in the
+    /// design notes). Overestimating only costs a marginally larger tail read; underestimating just
+    /// triggers the reader's existing second-read fallback.
+    constexpr size_t fixed_overhead = 4096;      /// schema + file-level key/value metadata
+    constexpr size_t per_row_group = 64;         /// RowGroupMetaData wrapper
+    constexpr size_t per_column_chunk = 112;     /// ColumnMetaData fixed fields (offsets, sizes, ...)
+    constexpr size_t floor_size = 64ul << 10;    /// never smaller than the default speculative read
+    constexpr size_t cap_size = 16ul << 20;      /// don't speculatively read an enormous tail
+
+    size_t est = fixed_overhead
+        + num_row_groups * (per_row_group + num_columns * per_column_chunk + bounds_bytes);
+    est += est / 3; /// ~1.3x safety for column names and Iceberg-vs-parquet truncation-length skew
+    return std::clamp(est, floor_size, cap_size);
+}
 
 struct SharedResourcesExt
 {
