@@ -76,7 +76,12 @@ dictionary encoding stats) instead of an all-or-nothing switch.
 - Partial-page subgroup boundaries are fine: a partial overlap of a constant page still yields that
   value, as long as every overlapping page is constant with the shared value.
 
-## Out of scope
+## Mixed-topology fill (Approach B) — implemented, default off
 
-In-subgroup partial fill for constant runs *shorter* than a subgroup (skip only those pages' bytes,
-yield a full column) — a later follow-up.
+`input_format_parquet_fill_constant_pages` handles constant runs *shorter* than / straddling a
+subgroup: `fillConstantPagesAndDecodeRest` fills single-value pages from the Column Index and decodes
+only the varying ones, and `determinePagesToPrefetch` skips prefetching the filled pages (a page
+shared with a subgroup that decodes it normally is still fetched — `willFillConstantPages` is
+deterministic so both paths agree). Gated to: no cast on the output value, no predicate on the
+column, no prewhere/row-level filter, and no all-null pages in the subgroup. Experimental, off by
+default; needs a build + correctness tests before it can be trusted.

@@ -1272,13 +1272,19 @@ void Reader::decodeOffsetIndex(ColumnChunk & column, const RowGroup & row_group)
     }
 }
 
-void Reader::determinePagesToPrefetch(ColumnChunk & column, const ColumnSubchunk & subchunk, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out)
+void Reader::determinePagesToPrefetch(ColumnChunk & column, const ColumnSubchunk & subchunk, const PrimitiveColumnInfo & column_info, const RowSubgroup & row_subgroup, const RowGroup & row_group, std::vector<PrefetchHandle *> & out)
 {
     chassert(row_subgroup.filter.rows_pass > 0);
     if (column.is_constant)
         return; // constant column: data pages are never read
     if (column.offset_index.page_locations.empty())
         return; // no offset index, can't prefetch individual pages
+
+    /// If this subgroup will fill its single-value pages from the Column Index instead of decoding
+    /// them (input_format_parquet_fill_constant_pages), don't prefetch those pages. Deterministic, so
+    /// the decode path (willFillConstantPages) makes the same decision. A const page shared with a
+    /// subgroup that decodes it normally is still claimed by that subgroup and thus fetched.
+    const bool fill_const_pages = willFillConstantPages(column, column_info, row_group, row_subgroup);
 
     if (column.data_pages.empty())
     {
@@ -1349,6 +1355,15 @@ void Reader::determinePagesToPrefetch(ColumnChunk & column, const ColumnSubchunk
         /// directly to their own (claimed) pages via the offset index.
         if (subchunk.is_constant)
             passes_filter = false;
+
+        /// Mixed-topology fill: this subgroup fills its single-value pages instead of decoding them,
+        /// so it does not need those pages. (Varying pages in the same subgroup are still claimed.)
+        if (passes_filter && fill_const_pages)
+        {
+            const size_t gid = size_t(page.meta - column.offset_index.page_locations.data());
+            if (gid < column.page_const_info.size() && column.page_const_info[gid].is_const)
+                passes_filter = false;
+        }
 
         if (passes_filter)
             out.push_back(&page.prefetch); // this subgroup needs this page
@@ -1604,6 +1619,8 @@ bool Reader::willFillConstantPages(
         return false; // no Column Index info retained
     if (column_info.column_index_condition)
         return false; // a predicate on this column may have pruned pages; keep the standard path
+    if (format_filter_info && (format_filter_info->prewhere_info || format_filter_info->row_level_filter))
+        return false; // a prewhere/row-level filter would make rows_pass < rows_total at decode time
     if (!constColumnMaterializationEligible(column_info))
         return false;
     if (row_subgroup.filter.rows_pass != row_subgroup.filter.rows_total)
