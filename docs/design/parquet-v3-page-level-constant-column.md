@@ -86,8 +86,13 @@ dictionary encoding stats) instead of an all-or-nothing switch.
 subgroup: `fillConstantPagesAndDecodeRest` fills single-value pages from the Column Index and decodes
 only the varying ones, and `determinePagesToPrefetch` skips prefetching the filled pages (a page
 shared with a subgroup that decodes it normally is still fetched — `willFillConstantPages` is
-deterministic so both paths agree). Gated to: no cast on the output value, no predicate on the
-column, no prewhere/row-level filter. All-null pages are handled (filled with nulls via the compact
-values + null map + `expand` path, or the output default under `null_as_default`); a subgroup with
-an all-null page only falls back when the output can represent neither null nor a default.
-Experimental, off by default; needs a build + correctness tests before it can be trusted.
+deterministic so both paths agree). The fill walks the rows that pass the filter (`row_subgroup.filter`), so it works under PREWHERE /
+row-level filters and page-pruning predicates too - it produces exactly `rows_pass` values for any
+filter, and because the decision no longer depends on `rows_pass` it is identical at prefetch time
+and decode time (so the prefetch-skip can never drop a page the decode needs). All-null pages are
+filled (nulls via the compact values + null map + `expand` path, or the output default under
+`null_as_default`); a subgroup with an all-null page falls back only when the output can represent
+neither null nor a default. The one remaining gate is `needs_cast`: the fill writes the Column Index
+value into the `decoded_type` column, valid only when no post-decode cast applies (resolving whether
+`decodeField` yields the decoded or the output value domain is build-gated). Experimental, off by
+default; needs a build + correctness tests before it can be trusted.

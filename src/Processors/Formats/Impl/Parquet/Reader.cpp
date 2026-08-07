@@ -1613,15 +1613,12 @@ bool Reader::willFillConstantPages(
         return false; // whole chunk already constant (tier 1)
     if (column.page_const_info.empty())
         return false; // no Column Index info retained
-    if (format_filter_info && (format_filter_info->prewhere_info || format_filter_info->row_level_filter))
-        return false; // a prewhere/row-level filter would make rows_pass < rows_total at decode time
-    /// A page-pruning predicate on this column (column_index_condition without prewhere) is fine:
-    /// pruned pages fall outside every subgroup's contiguous surviving row range, so the fill never
-    /// walks them, and the prefetch-skip indexes page_const_info by each page's global position.
+    /// PREWHERE / row-level filters and page-pruning predicates are all handled: the fill walks only
+    /// the rows that pass the filter (row_subgroup.filter), so it produces exactly rows_pass values
+    /// for any filter, and pruned pages fall outside the subgroup's surviving ranges. The decision
+    /// here is independent of rows_pass, so it is identical at prefetch time and decode time.
     if (!constColumnMaterializationEligible(column_info))
         return false;
-    if (row_subgroup.filter.rows_pass != row_subgroup.filter.rows_total)
-        return false; // some rows filtered out in this subgroup; avoid filter/range intersection
 
     /// We fill the decoded_type column with the output-domain value from the Column Index, which is
     /// only valid when no post-decode cast is applied (decoded_type == output value type).
@@ -1663,60 +1660,81 @@ void Reader::fillConstantPagesAndDecodeRest(
     ColumnSubchunk & subchunk, const RowGroup & row_group, RowSubgroup & row_subgroup)
 {
     const size_t start = row_subgroup.start_row_idx;
-    const size_t end = start + row_subgroup.filter.rows_total;
+    const size_t rows_total = row_subgroup.filter.rows_total;
     const auto & pages = column.offset_index.page_locations;
     const size_t num_pages = pages.size();
     const size_t rg_rows = size_t(row_group.meta->num_rows);
+    const auto & filter = row_subgroup.filter.filter;
 
     ColumnUInt8::Container * null_map_data = subchunk.null_map
         ? &assert_cast<ColumnUInt8 &>(*subchunk.null_map).getData()
         : nullptr;
 
-    /// Position at the first page overlapping `start`.
-    size_t p = 0;
-    while (p < num_pages && (p + 1 < num_pages ? size_t(pages[p + 1].first_row_index) : rg_rows) <= start)
-        ++p;
+    auto page_end_of = [&](size_t pg) { return (pg + 1 < num_pages) ? size_t(pages[pg + 1].first_row_index) : rg_rows; };
 
-    size_t row = start;
-    while (row < end)
+    /// Iterate the ranges of rows that pass the filter (like the standard row-range decode), and walk
+    /// the pages overlapping each range. Within a passing range every row is output, so a constant /
+    /// all-null page contributes exactly its overlapping row count, and a varying page is decoded for
+    /// that contiguous sub-range. This produces the compact (non-null) values + null map that the
+    /// caller's expand() / Nullable-wrap / null_as_default tail finalizes - matching the normal
+    /// decode for any rows_pass, so no rows_pass == rows_total restriction is needed.
+    size_t page_cursor = 0; // forward cursor over page_locations
+    size_t row_subidx = 0;  // offset within [0, rows_total)
+    while (true)
     {
-        chassert(p < num_pages);
-        const size_t p_end = (p + 1 < num_pages) ? size_t(pages[p + 1].first_row_index) : rg_rows;
-        const size_t seg_end = std::min(end, p_end);
-        chassert(seg_end > row);
-        const size_t count = seg_end - row;
-        const auto & pci = column.page_const_info[p];
+        size_t num_rows = rows_total - row_subidx;
+        if (!filter.empty())
+        {
+            while (row_subidx < rows_total && !filter[row_subidx])
+                ++row_subidx;
+            num_rows = 0;
+            while (row_subidx + num_rows < rows_total && filter[row_subidx + num_rows])
+                ++num_rows;
+        }
+        if (!num_rows)
+            break;
+        const size_t range_start = start + row_subidx;
+        const size_t range_end = range_start + num_rows;
+        row_subidx += num_rows;
 
-        if (pci.is_const)
+        size_t row = range_start;
+        while (row < range_end)
         {
-            /// Fill the single value without reading the page. Value is in the output value domain,
-            /// which equals decoded_type here (willFillConstantPages required no cast). A single-value
-            /// page has no nulls, so any null map gets zeros for these rows.
-            subchunk.column->insertMany(pci.value, count);
-            if (null_map_data)
-                null_map_data->resize_fill(null_map_data->size() + count, 0);
-        }
-        else if (pci.all_null)
-        {
-            /// All-null page: append no non-null values (the column holds the compact non-null
-            /// values); mark every row null. The caller's tail expand()s defaults into these
-            /// positions and applies the Nullable wrap / null_as_default handling, exactly as the
-            /// normal decode does. null_map exists here (an all-null page implies need_null_map).
-            chassert(null_map_data);
-            null_map_data->resize_fill(null_map_data->size() + count, 1);
-        }
-        else
-        {
-            /// Varying page: decode [row, seg_end) via the normal machinery. skipToRowOrNextPage jumps
-            /// to this page (via the offset index), stepping over any filled const pages without
-            /// loading them; readRowsInPage appends the decoded values (and null-map entries).
-            skipToRowOrNextPage(row, column, column_info);
-            readRowsInPage(seg_end, subchunk, column, column_info, &row_subgroup);
-        }
+            while (page_cursor < num_pages && page_end_of(page_cursor) <= row)
+                ++page_cursor;
+            chassert(page_cursor < num_pages);
+            const size_t seg_end = std::min(range_end, page_end_of(page_cursor));
+            chassert(seg_end > row);
+            const size_t count = seg_end - row;
+            const auto & pci = column.page_const_info[page_cursor];
 
-        row = seg_end;
-        if (row == p_end)
-            ++p;
+            if (pci.is_const)
+            {
+                /// Fill the single value without reading the page (value is in decoded_type domain,
+                /// which equals the output value domain - willFillConstantPages required no cast). A
+                /// single-value page has no nulls, so any null map gets zeros for these rows.
+                subchunk.column->insertMany(pci.value, count);
+                if (null_map_data)
+                    null_map_data->resize_fill(null_map_data->size() + count, 0);
+            }
+            else if (pci.all_null)
+            {
+                /// All-null page: no non-null values; mark these rows null (expand() fills defaults
+                /// later). null_map exists here (an all-null page implies need_null_map).
+                chassert(null_map_data);
+                null_map_data->resize_fill(null_map_data->size() + count, 1);
+            }
+            else
+            {
+                /// Varying page: decode the contiguous passing sub-range [row, seg_end). All rows in
+                /// it pass, so no per-row filter is applied here. skipToRowOrNextPage jumps to the page
+                /// via the offset index, stepping over filled const/all-null pages without loading them.
+                skipToRowOrNextPage(row, column, column_info);
+                readRowsInPage(seg_end, subchunk, column, column_info, /*row_subgroup=*/ nullptr);
+            }
+
+            row = seg_end;
+        }
     }
 }
 
