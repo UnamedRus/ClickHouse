@@ -120,6 +120,11 @@ struct RelativePathWithMetadata
     /// Object metadata: size, modification time, etc.
     std::optional<ObjectMetadata> metadata;
 
+    /// Optional per-file hint (bytes) for how much of the file tail to read to get the format's
+    /// footer/metadata. Set by data lakes that already know per-file stats (e.g. Iceberg from the
+    /// manifest) and consumed by the format reader (see Parquet ReadOptions::footer_metadata_size_hint).
+    std::optional<size_t> footer_size_hint;
+
     RelativePathWithMetadata() = default;
 
     explicit RelativePathWithMetadata(String relative_path_, std::optional<ObjectMetadata> metadata_ = std::nullopt)

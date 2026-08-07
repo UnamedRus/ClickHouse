@@ -16,6 +16,11 @@
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
 
+#if USE_PARQUET
+#include <Processors/Formats/Impl/Parquet/ReadCommon.h>
+#include <Storages/ObjectStorage/DataLakes/Iceberg/ManifestFile.h>
+#endif
+
 namespace DB::ErrorCodes
 {
 extern const int NOT_IMPLEMENTED;
@@ -52,6 +57,16 @@ String computePartitionId(const Row & partition_key_value)
 
 #if USE_AVRO
 
+#if USE_PARQUET
+/// Rough byte size of a decoded manifest bound value, used only to size the parquet footer read.
+static size_t estimateBoundFieldBytes(const Field & f)
+{
+    if (f.getType() == Field::Types::String)
+        return f.safeGet<String>().size();
+    return 16; /// conservative for numeric / decimal / date / uuid bounds
+}
+#endif
+
 IcebergDataObjectInfo::IcebergDataObjectInfo(
     Iceberg::ProcessedManifestFileEntryPtr data_manifest_file_entry_, const String & resolved_storage_path_, Int32 schema_id_relevant_to_iterator_)
     : ObjectInfo(RelativePathWithMetadata(resolved_storage_path_))
@@ -68,6 +83,28 @@ IcebergDataObjectInfo::IcebergDataObjectInfo(
           data_manifest_file_entry_->parsed_entry->record_count,
           data_manifest_file_entry_->parsed_entry->file_size_in_bytes}
 {
+#if USE_PARQUET
+    /// Precompute a footer-size hint from the manifest stats so the parquet reader can fetch the
+    /// FileMetaData in a single tail read (see Parquet::estimateParquetFooterSize). Parquet only;
+    /// the hint is ignored by other formats. row-group count is estimated from record_count because
+    /// split_offsets are not parsed. Only affects read count, never correctness.
+    const auto & entry = *data_manifest_file_entry_->parsed_entry;
+    if (entry.file_format == "PARQUET")
+    {
+        size_t num_columns = std::max(entry.columns_infos.size(), entry.value_bounds.size());
+        if (num_columns > 0)
+        {
+            constexpr size_t rows_per_row_group_guess = 1'000'000;
+            size_t rows = size_t(std::max<Int64>(entry.record_count, 0));
+            size_t num_row_groups = std::max<size_t>(1, (rows + rows_per_row_group_guess - 1) / rows_per_row_group_guess);
+            size_t bounds_bytes = 0;
+            for (const auto & [field_id, bounds] : entry.value_bounds)
+                bounds_bytes += estimateBoundFieldBytes(bounds.first) + estimateBoundFieldBytes(bounds.second);
+            relative_path_with_metadata.footer_size_hint
+                = Parquet::estimateParquetFooterSize(num_columns, num_row_groups, bounds_bytes);
+        }
+    }
+#endif
 }
 
 IcebergDataObjectInfo::IcebergDataObjectInfo(const RelativePathWithMetadata & path_)

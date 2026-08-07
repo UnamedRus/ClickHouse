@@ -58,6 +58,12 @@ ParquetV3BlockInputFormat::ParquetV3BlockInputFormat(
     read_options.min_bytes_for_seek = min_bytes_for_seek;
     read_options.bytes_per_read_task = min_bytes_for_seek * 4;
 
+    /// A data lake (e.g. Iceberg) may have precomputed how much of the file tail to read for the
+    /// footer from its per-file stats; use it to size the initial metadata read (see
+    /// estimateParquetFooterSize). 0/absent keeps the default speculative read.
+    if (object_with_metadata && object_with_metadata->footer_size_hint)
+        read_options.footer_metadata_size_hint = *object_with_metadata->footer_size_hint;
+
     if (!format_filter_info)
         format_filter_info = std::make_shared<FormatFilterInfo>();
 }
