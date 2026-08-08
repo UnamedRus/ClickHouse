@@ -219,6 +219,12 @@ Experimental. When a Parquet column is single-valued over some data pages but no
     DECLARE(Bool, input_format_parquet_align_reads_to_multipart_boundaries, false, R"(
 Experimental. Align coalesced Parquet read requests to the boundaries of the object's S3 multipart-upload parts, so a single read never straddles two parts (an AWS best practice). Requires the per-file multipart layout, learned via GetObjectAttributes and cached (see the object-storage identity cache); has no effect for single-part objects or stores that don't expose part info. Disabled by default.
 )", 0) \
+    DECLARE(UInt64, input_format_parquet_read_alignment_bytes, 0, R"(
+Experimental. Align coalesced Parquet read requests to a fixed byte grid of this size, so no read straddles a multiple of it. Set to the writer's multipart part size (e.g. 10Mi for delta-rs, 64Mi for Spark/S3A) to keep reads within single parts without probing per-file layout. 0 disables. When `input_format_parquet_align_reads_to_multipart_boundaries` is enabled and the real per-file part layout is known, that takes precedence over this fixed grid.
+)", 0) \
+    DECLARE(UInt64, input_format_parquet_read_alignment_min_bytes, 1048576, R"(
+Experimental. Anti-fragmentation guard for Parquet read alignment (`input_format_parquet_read_alignment_bytes` / `input_format_parquet_align_reads_to_multipart_boundaries`): do not cut a read at a boundary when the resulting aligned segment would be smaller than this many bytes; allow the straddle instead of emitting a tiny extra request. Default 1 MiB.
+)", 0) \
     DECLARE(Double, input_format_parquet_prefetch_bandwidth_hide_seconds, 0, R"(
 Read back-pressure for the Parquet v3 reader. When greater than zero, stop prefetching more compressed data pages ahead of decoding once the in-flight compressed bytes exceed this many seconds' worth of the measured read throughput (i.e. once the storage link is kept busy). Prevents buffering compressed data far beyond what bandwidth can consume. 0 disables the back-pressure (compressed prefetch is then bounded only by its memory budget).
 )", 0) \

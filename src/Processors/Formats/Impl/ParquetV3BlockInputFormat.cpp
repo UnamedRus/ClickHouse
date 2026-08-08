@@ -74,6 +74,10 @@ ParquetV3BlockInputFormat::ParquetV3BlockInputFormat(
             object_with_metadata->metadata->part_offsets.begin(),
             object_with_metadata->metadata->part_offsets.end());
 
+    /// Fixed-grid alignment (no per-file layout needed) + the anti-fragmentation min-segment guard.
+    read_options.read_alignment_stride = read_options.format.parquet.read_alignment_bytes;
+    read_options.read_alignment_min_bytes = read_options.format.parquet.read_alignment_min_bytes;
+
     if (!format_filter_info)
         format_filter_info = std::make_shared<FormatFilterInfo>();
 }

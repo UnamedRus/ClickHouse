@@ -53,8 +53,17 @@ struct ReadOptions
     /// [multipart_part_offsets[i], multipart_part_offsets[i+1])). Learned from GetObjectAttributes
     /// (see ObjectStorageIdentityCache) and used to align coalesced read tasks to part boundaries so
     /// a single read never straddles two parts. Empty = unknown / single-part -> no alignment.
-    /// EXPERIMENTAL: used to measure the effect of part-boundary-aligned reads.
+    /// EXPERIMENTAL: used to measure the effect of part-boundary-aligned reads. Takes precedence over
+    /// read_alignment_stride when non-empty.
     std::vector<size_t> multipart_part_offsets;
+
+    /// Fixed boundary grid (bytes) for read alignment when the real per-file part layout is unknown:
+    /// no coalesced read straddles a multiple of this. 0 = off. EXPERIMENTAL.
+    size_t read_alignment_stride = 0;
+
+    /// Anti-fragmentation guard: don't cut a read at an alignment boundary if the resulting aligned
+    /// segment would be smaller than this many bytes (allow the straddle instead of a tiny read).
+    size_t read_alignment_min_bytes = 0;
 };
 
 /// Estimate the serialized size of a parquet FileMetaData footer, to size the initial tail read.

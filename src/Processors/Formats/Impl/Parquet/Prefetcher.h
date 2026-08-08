@@ -195,7 +195,13 @@ private:
 
     /// Cumulative start offsets of the object's S3 multipart-upload parts, used to keep coalesced
     /// read tasks within a single part. Empty = no alignment. Set once in init(), read-only after.
+    /// Takes precedence over read_alignment_stride when non-empty.
     std::vector<size_t> multipart_part_offsets;
+
+    /// Fixed boundary grid (bytes) used for read alignment when multipart_part_offsets is empty.
+    /// 0 = off. And the anti-fragmentation min aligned-segment size. Set in init(), read-only after.
+    size_t read_alignment_stride = 0;
+    size_t read_alignment_min_bytes = 0;
 
     /// Tail chunk retained by retainTail() to serve fully-contained ranges (Column/Offset Index)
     /// without a second read. Written once before any prefetching, read-only afterwards.

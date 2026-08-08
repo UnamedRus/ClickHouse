@@ -26,6 +26,7 @@ namespace ProfileEvents
     extern const Event ParquetPrefetcherReadEntireFile;
     extern const Event ParquetPrefetcherServedFromRetainedTail;
     extern const Event ParquetPrefetcherPartAlignedTasks;
+    extern const Event ParquetPrefetcherAlignmentSkippedSmall;
 }
 
 namespace DB::Parquet
@@ -36,6 +37,8 @@ void Prefetcher::init(ReadBuffer * reader_, const ReadOptions & options, FormatP
     min_bytes_for_seek = options.min_bytes_for_seek;
     bytes_per_read_task = options.bytes_per_read_task;
     multipart_part_offsets = options.multipart_part_offsets;
+    read_alignment_stride = options.read_alignment_stride;
+    read_alignment_min_bytes = options.read_alignment_min_bytes;
     parser_shared_resources = parser_shared_resources_;
     determineReadModeAndFileSize(reader_, options);
     range_sets.resize(1);
@@ -367,18 +370,35 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
     size_t end_idx = range_idx + 1;
     size_t total_length_of_covered_ranges = end_offset - start_offset;
 
-    /// EXPERIMENTAL part-boundary alignment: keep this coalesced task within a single S3 multipart
-    /// part, so one read never straddles a part boundary (an AWS best practice). Constrain coalescing
-    /// to [part_lo, part_hi) - the part containing the initial requested range's start. This only
-    /// limits *coalescing* across a boundary; a single requested range larger than a part is left as
-    /// is (would require splitRange). Empty offsets -> no constraint.
+    /// EXPERIMENTAL read alignment: keep this coalesced task within a single boundary window
+    /// [part_lo, part_hi) - the window containing the initial requested range's start - so one read
+    /// never straddles a boundary (an AWS best practice for multipart-uploaded objects). Boundaries
+    /// come from the real per-file multipart layout (multipart_part_offsets) when known, else from a
+    /// fixed grid (read_alignment_stride). This only limits *coalescing* across a boundary; a single
+    /// requested range larger than a window is left as is (would require splitRange).
     size_t part_lo = 0;
     size_t part_hi = std::numeric_limits<size_t>::max();
+    bool alignment_active = false;
     if (!multipart_part_offsets.empty())
     {
         auto it = std::upper_bound(multipart_part_offsets.begin(), multipart_part_offsets.end(), start_offset);
         part_hi = (it == multipart_part_offsets.end()) ? file_size : *it;
         part_lo = (it == multipart_part_offsets.begin()) ? 0 : *std::prev(it);
+        alignment_active = true;
+    }
+    else if (read_alignment_stride > 0)
+    {
+        part_lo = start_offset / read_alignment_stride * read_alignment_stride;
+        part_hi = part_lo + read_alignment_stride;
+        alignment_active = true;
+    }
+
+    /// Anti-fragmentation: if the aligned segment ahead of the initial range would be smaller than
+    /// read_alignment_min_bytes, cutting here would emit a tiny read - allow the straddle instead.
+    if (alignment_active && read_alignment_min_bytes > 0 && part_hi - start_offset < read_alignment_min_bytes)
+    {
+        alignment_active = false;
+        ProfileEvents::increment(ProfileEvents::ParquetPrefetcherAlignmentSkippedSmall);
     }
     bool part_boundary_constrained = false;
 
@@ -392,7 +412,7 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
             !r.request->allow_incidental_read.load(std::memory_order_relaxed)) // range wants to be coalesced
             break;
 
-        if (r.start < part_lo) // would cross below this part's boundary
+        if (alignment_active && r.start < part_lo) // would cross below this boundary window
         {
             part_boundary_constrained = true;
             break;
@@ -433,7 +453,7 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
             !r.request->allow_incidental_read.load(std::memory_order_relaxed))
             break;
 
-        if (r.end > part_hi) // would cross above this part's boundary
+        if (alignment_active && r.end > part_hi) // would cross above this boundary window
         {
             part_boundary_constrained = true;
             break;
