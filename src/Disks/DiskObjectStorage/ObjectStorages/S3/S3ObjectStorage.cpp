@@ -201,6 +201,7 @@ private:
                     .etag = object.GetETag(),
                     .tags = {},
                     .attributes = {},
+                    .part_offsets = {},
                 };
                 if (with_tags)
                     metadata.tags = S3::getObjectTags(*client, request->GetBucket(), object.GetKey());
@@ -382,6 +383,7 @@ void S3ObjectStorage::listObjects(const std::string & path, RelativePathsWithMet
                     .etag = object.GetETag(),
                     .tags = {},
                     .attributes = {},
+                    .part_offsets = {},
                 }));
 
         if (max_keys)
