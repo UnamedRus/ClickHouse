@@ -1456,6 +1456,8 @@ The server successfully detected this situation and will download merged part fr
     M(ParquetPrefetcherServedFromRetainedTail, "The number of ranges (e.g. Column/Offset Index) served from the retained footer tail by DB::Parquet::Prefetcher without issuing a read", ValueType::Number) \
     M(ParquetPrefetcherPartAlignedTasks, "The number of read tasks whose coalescing was constrained to a single S3 multipart-upload part boundary by DB::Parquet::Prefetcher", ValueType::Number) \
     M(ParquetPrefetcherAlignmentSkippedSmall, "The number of times DB::Parquet::Prefetcher skipped read alignment because the aligned segment would be smaller than the configured minimum (anti-fragmentation)", ValueType::Number) \
+    M(ParquetPrefetcherHedgedReads, "The number of hedged (duplicate) reads issued by DB::Parquet::Prefetcher to cut read tail latency", ValueType::Number) \
+    M(ParquetPrefetcherHedgedWins, "The number of hedged reads that produced the result used (beat or replaced the primary read) in DB::Parquet::Prefetcher", ValueType::Number) \
     M(ParquetRowsFilterExpression, "The total number of rows that were passed through filter", ValueType::Number) \
     M(ParquetColumnsFilterExpression, "The total number of columns that were passed through filter", ValueType::Number) \
     M(FilterTransformPassedRows, "Number of rows that passed the filter in the query", ValueType::Number) \

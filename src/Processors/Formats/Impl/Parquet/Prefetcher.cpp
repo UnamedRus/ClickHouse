@@ -27,6 +27,8 @@ namespace ProfileEvents
     extern const Event ParquetPrefetcherServedFromRetainedTail;
     extern const Event ParquetPrefetcherPartAlignedTasks;
     extern const Event ParquetPrefetcherAlignmentSkippedSmall;
+    extern const Event ParquetPrefetcherHedgedReads;
+    extern const Event ParquetPrefetcherHedgedWins;
 }
 
 namespace DB::Parquet
@@ -39,6 +41,9 @@ void Prefetcher::init(ReadBuffer * reader_, const ReadOptions & options, FormatP
     multipart_part_offsets = options.multipart_part_offsets;
     read_alignment_stride = options.read_alignment_stride;
     read_alignment_min_bytes = options.read_alignment_min_bytes;
+    hedged_read_threshold_ms = options.hedged_read_threshold_ms;
+    hedged_read_max_bytes = options.hedged_read_max_bytes;
+    hedged_read_max_inflight = options.hedged_read_max_inflight;
     parser_shared_resources = parser_shared_resources_;
     determineReadModeAndFileSize(reader_, options);
     range_sets.resize(1);
@@ -520,6 +525,7 @@ void Prefetcher::decreaseTaskRefcount(Task * task, size_t amount)
     {
         task->buf = {};
         task->cached_region.reset();
+        task->hedge_buf = {}; // hedge (if any) is synchronous and already finished by now
     }
 }
 
@@ -533,6 +539,44 @@ void Prefetcher::scheduleTask(Task * task)
                     return;
                 runTask(task);
             });
+}
+
+bool Prefetcher::hedgeReadSync(Task * task)
+{
+    /// Wait up to the threshold for the primary; if it finishes in time, no hedge is needed.
+    if (task->completion.wait_for(hedged_read_threshold_ms))
+        return false;
+
+    /// Primary is slow. Only one consumer hedges a given task.
+    bool expected = false;
+    if (!task->hedge_started.compare_exchange_strong(expected, true))
+        return false; // someone else is hedging (or already did) -> fall back to completion.wait()
+
+    /// Cost cap: bound concurrent hedges so a slow region can't double all traffic.
+    if (hedges_inflight.fetch_add(1) >= hedged_read_max_inflight)
+    {
+        hedges_inflight.fetch_sub(1);
+        return false;
+    }
+
+    ProfileEvents::increment(ProfileEvents::ParquetPrefetcherHedgedReads);
+    bool ok = false;
+    try
+    {
+        /// Read the same range on this (already-blocked) consumer thread, racing the primary.
+        task->hedge_buf.resize(task->length);
+        readSync(task->hedge_buf.data(), task->length, task->offset);
+        task->hedge_winner.store(2, std::memory_order_release);
+        task->completion.notify(); // wake sharers waiting on the primary; they'll use hedge_buf
+        ProfileEvents::increment(ProfileEvents::ParquetPrefetcherHedgedWins);
+        ok = true;
+    }
+    catch (...)
+    {
+        task->hedge_buf = {}; // hedge failed; fall back to the primary read
+    }
+    hedges_inflight.fetch_sub(1);
+    return ok;
 }
 
 std::span<const char> Prefetcher::getRangeData(const PrefetchHandle & request)
@@ -553,12 +597,33 @@ std::span<const char> Prefetcher::getRangeData(const PrefetchHandle & request)
 
         if (s == Task::State::Running) // (not `else`, the runTask above may return Running)
         {
-            task->completion.wait();
+            /// Hedging: if the primary read hasn't finished within the threshold, issue a duplicate
+            /// read to cut the S3 GET tail. Eligible only for real (non-cached) remote reads no
+            /// larger than the size cap. hedgeReadSync waits up to the threshold itself.
+            bool served_by_hedge = false;
+            if (hedged_read_threshold_ms > 0 && read_mode == ReadMode::RandomRead
+                && !task->cached_region.has_value() && task->length > 0
+                && (hedged_read_max_bytes == 0 || task->length <= hedged_read_max_bytes))
+            {
+                served_by_hedge = hedgeReadSync(task);
+            }
+
+            if (!served_by_hedge)
+                task->completion.wait();
             s = task->state.load();
         }
 
         ProfileEvents::increment(ProfileEvents::ParquetFetchWaitTimeMicroseconds, wait_time.elapsedMicroseconds());
     }
+
+    /// If a hedge produced the data, use it regardless of the primary's state (which may still be
+    /// Running, or even Exception if the primary failed but the hedge succeeded).
+    if (task->hedge_winner.load(std::memory_order_acquire) == 2)
+    {
+        chassert(req->task_offset + req->length <= task->hedge_buf.size());
+        return std::span(task->hedge_buf.data() + req->task_offset, req->length);
+    }
+
     if (s == Task::State::Exception)
         rethrowException(task);
     chassert(s == Task::State::Done);
@@ -651,6 +716,7 @@ Prefetcher::Task::State Prefetcher::runTask(Task * task)
         chassert(s == Task::State::Deallocated);
         task->buf = {};
         task->cached_region.reset();
+        task->hedge_buf = {};
     }
 
     task->completion.notify();

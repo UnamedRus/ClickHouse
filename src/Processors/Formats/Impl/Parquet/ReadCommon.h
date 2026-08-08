@@ -64,6 +64,14 @@ struct ReadOptions
     /// Anti-fragmentation guard: don't cut a read at an alignment boundary if the resulting aligned
     /// segment would be smaller than this many bytes (allow the straddle instead of a tiny read).
     size_t read_alignment_min_bytes = 0;
+
+    /// Hedged reads (tail-latency mitigation): if a read a consumer is blocked on hasn't completed
+    /// within hedged_read_threshold_ms, issue a duplicate read and take whichever returns first.
+    /// 0 = off. Only reads no larger than hedged_read_max_bytes are hedged (latency, not throughput),
+    /// and at most hedged_read_max_inflight hedges run concurrently (cost cap). EXPERIMENTAL.
+    size_t hedged_read_threshold_ms = 0;
+    size_t hedged_read_max_bytes = 0;
+    size_t hedged_read_max_inflight = 0;
 };
 
 /// Estimate the serialized size of a parquet FileMetaData footer, to size the initial tail read.
@@ -268,6 +276,8 @@ private:
 public:
     bool check() const;
     void wait();
+    /// Wait up to timeout_ms. Returns true if notified, false on timeout.
+    bool wait_for(UInt64 timeout_ms);
     void notify();
 };
 
@@ -283,6 +293,8 @@ private:
 public:
     bool check() const;
     void wait();
+    /// Wait up to timeout_ms. Returns true if notified, false on timeout.
+    bool wait_for(UInt64 timeout_ms);
     void notify();
 };
 

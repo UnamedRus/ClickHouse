@@ -78,6 +78,11 @@ ParquetV3BlockInputFormat::ParquetV3BlockInputFormat(
     read_options.read_alignment_stride = read_options.format.parquet.read_alignment_bytes;
     read_options.read_alignment_min_bytes = read_options.format.parquet.read_alignment_min_bytes;
 
+    /// Hedged reads (tail-latency mitigation).
+    read_options.hedged_read_threshold_ms = read_options.format.parquet.hedged_read_threshold_ms;
+    read_options.hedged_read_max_bytes = read_options.format.parquet.hedged_read_max_bytes;
+    read_options.hedged_read_max_inflight = read_options.format.parquet.hedged_read_max_inflight;
+
     if (!format_filter_info)
         format_filter_info = std::make_shared<FormatFilterInfo>();
 }

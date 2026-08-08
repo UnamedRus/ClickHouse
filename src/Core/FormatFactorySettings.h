@@ -225,6 +225,15 @@ Experimental. Align coalesced Parquet read requests to a fixed byte grid of this
     DECLARE(UInt64, input_format_parquet_read_alignment_min_bytes, 1048576, R"(
 Experimental. Anti-fragmentation guard for Parquet read alignment (`input_format_parquet_read_alignment_bytes` / `input_format_parquet_align_reads_to_multipart_boundaries`): do not cut a read at a boundary when the resulting aligned segment would be smaller than this many bytes; allow the straddle instead of emitting a tiny extra request. Default 1 MiB.
 )", 0) \
+    DECLARE(UInt64, input_format_parquet_hedged_read_threshold_ms, 0, R"(
+Experimental. Tail-latency mitigation for the Parquet v3 reader on remote object storage: if a read a query is blocked on has not completed within this many milliseconds, issue a duplicate (hedged) request and use whichever returns first. Cuts the S3 GET p99 tail at the cost of a few extra requests. 0 disables. Only reads no larger than `input_format_parquet_hedged_read_max_bytes` are hedged, and at most `input_format_parquet_hedged_read_max_inflight` hedges run at once.
+)", 0) \
+    DECLARE(UInt64, input_format_parquet_hedged_read_max_bytes, 4194304, R"(
+Experimental. Only hedge Parquet reads (see `input_format_parquet_hedged_read_threshold_ms`) no larger than this - hedging targets latency of small/critical reads, not throughput of large coalesced reads. 0 = no size limit. Default 4 MiB.
+)", 0) \
+    DECLARE(UInt64, input_format_parquet_hedged_read_max_inflight, 4, R"(
+Experimental. Cap on concurrent hedged Parquet reads (see `input_format_parquet_hedged_read_threshold_ms`), so a slow region cannot double all traffic. Default 4.
+)", 0) \
     DECLARE(Double, input_format_parquet_prefetch_bandwidth_hide_seconds, 0, R"(
 Read back-pressure for the Parquet v3 reader. When greater than zero, stop prefetching more compressed data pages ahead of decoding once the in-flight compressed bytes exceed this many seconds' worth of the measured read throughput (i.e. once the storage link is kept busy). Prevents buffering compressed data far beyond what bandwidth can consume. 0 disables the back-pressure (compressed prefetch is then bounded only by its memory budget).
 )", 0) \

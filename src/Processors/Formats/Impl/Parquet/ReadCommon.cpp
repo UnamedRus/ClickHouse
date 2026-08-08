@@ -3,6 +3,8 @@
 #include <Common/futex.h>
 #include <Formats/FormatParserSharedResources.h>
 
+#include <chrono>
+
 namespace DB::Parquet
 {
 
@@ -58,6 +60,35 @@ void CompletionNotification::notify()
         futexWake(&val, INT32_MAX);
 }
 
+bool CompletionNotification::wait_for(UInt64 timeout_ms)
+{
+    UInt32 n = val.load(std::memory_order_acquire);
+    if (n == NOTIFIED)
+        return true;
+    if (n == EMPTY)
+    {
+        if (!val.compare_exchange_strong(n, WAITING))
+        {
+            if (n == NOTIFIED)
+                return true;
+            chassert(n == WAITING);
+        }
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (true)
+    {
+        n = val.load();
+        if (n == NOTIFIED)
+            return true;
+        chassert(n == WAITING);
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+            return false;
+        const UInt64 remaining_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(deadline - now).count();
+        futexTimedWait(&val, WAITING, remaining_ns); // may wake spuriously / on partial timeout; loop re-checks
+    }
+}
+
 #else
 
 bool CompletionNotification::check() const
@@ -75,6 +106,13 @@ void CompletionNotification::notify()
 {
     if (!notified.exchange(true))
         promise.set_value();
+}
+
+bool CompletionNotification::wait_for(UInt64 timeout_ms)
+{
+    if (check())
+        return true;
+    return future.wait_for(std::chrono::milliseconds(timeout_ms)) == std::future_status::ready;
 }
 
 #endif

@@ -161,9 +161,18 @@ private:
         std::atomic<State> state {State::Scheduled};
         /// How many RequestState-s in HasTask state point to this Task.
         std::atomic<size_t> refcount {};
-        /// Notified when the state changes from Running to Done or Exception.
+        /// Notified when the state changes from Running to Done or Exception (by the primary read, or
+        /// by a hedge read - whichever finishes first).
         CompletionNotification completion;
         std::exception_ptr exception;
+
+        /// Hedging (tail-latency mitigation): a second read of the same range, raced against the
+        /// primary. Whichever finishes first CAS-wins `hedge_winner` (1 = primary, 2 = hedge) and
+        /// notifies `completion`; getRangeData then returns the winner's buffer. `hedge_buf` holds
+        /// the hedge read; `hedge_started` guards launching it at most once.
+        PaddedPODArray<char> hedge_buf;
+        std::atomic<int> hedge_winner {0};
+        std::atomic<bool> hedge_started {false};
     };
 
     enum class ReadMode
@@ -203,6 +212,13 @@ private:
     size_t read_alignment_stride = 0;
     size_t read_alignment_min_bytes = 0;
 
+    /// Hedged reads (tail-latency mitigation). Set in init(), read-only after. hedges_inflight is the
+    /// live count, bounded by hedged_read_max_inflight.
+    size_t hedged_read_threshold_ms = 0;
+    size_t hedged_read_max_bytes = 0;
+    size_t hedged_read_max_inflight = 0;
+    std::atomic<size_t> hedges_inflight {0};
+
     /// Tail chunk retained by retainTail() to serve fully-contained ranges (Column/Offset Index)
     /// without a second read. Written once before any prefetching, read-only afterwards.
     /// [retained_tail_start, retained_tail_end) are file offsets; empty range == nothing retained.
@@ -239,6 +255,16 @@ private:
     void scheduleTask(Task * task);
     Task::State runTask(Task * task);
     [[noreturn]] void rethrowException(Task * task);
+
+    /// Issue a duplicate (hedged) read of `task`'s range when the primary is slow, to cut tail
+    /// latency. Phase A: the read runs synchronously on the calling (already-blocked) consumer
+    /// thread into task->hedge_buf; on success sets hedge_winner=2 and notifies so sharers wake.
+    /// Returns true if a usable hedge result was produced. At most once per task (hedge_started
+    /// guard), bounded by hedged_read_max_inflight, and only for real (non-cached) remote reads.
+    /// NOTE: a fully async race (Phase B) would need decreaseTaskRefcount to defer freeing
+    /// hedge_buf until an in-flight hedge finishes (the refcount/Deallocated path assumes one
+    /// reader) - deferred to avoid a use-after-free on hedge_buf.
+    bool hedgeReadSync(Task * task);
 };
 
 /// Pins a pre-registered range that we may want to read.
