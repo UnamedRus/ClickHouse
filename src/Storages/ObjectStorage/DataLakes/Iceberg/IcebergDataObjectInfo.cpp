@@ -83,6 +83,12 @@ IcebergDataObjectInfo::IcebergDataObjectInfo(
           data_manifest_file_entry_->parsed_entry->record_count,
           data_manifest_file_entry_->parsed_entry->file_size_in_bytes}
 {
+    /// Note: object identity (size / etag / multipart part offsets) is intentionally NOT pre-populated
+    /// from the manifest here. It is fetched once via GetObjectAttributes and cached by the
+    /// object-storage identity cache (see S3ObjectStorage::getObjectMetadata / ObjectStorageIdentityCache),
+    /// so all object reads - Iceberg data files included - go through one path that yields the real
+    /// ETag (needed by the filesystem / page / parquet-metadata caches) and the multipart layout
+    /// (needed for read alignment). Pre-populating metadata here would skip that path and lose both.
 #if USE_PARQUET
     /// Precompute a footer-size hint from the manifest stats so the parquet reader can fetch the
     /// FileMetaData in a single tail read (see Parquet::estimateParquetFooterSize). Parquet only;

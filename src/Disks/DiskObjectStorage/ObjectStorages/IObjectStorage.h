@@ -110,6 +110,10 @@ struct ObjectMetadata
     std::string etag;
     ObjectAttributes tags;
     ObjectAttributes attributes;
+    /// Cumulative start offsets of the object's multipart-upload parts (part i covers
+    /// [part_offsets[i], part_offsets[i+1])). Populated best-effort via GetObjectAttributes; empty
+    /// when unknown or single-PUT. Used to align reads to part boundaries.
+    std::vector<uint64_t> part_offsets;
 };
 
 struct DataLakeObjectMetadata;
