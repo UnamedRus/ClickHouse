@@ -64,6 +64,16 @@ ParquetV3BlockInputFormat::ParquetV3BlockInputFormat(
     if (object_with_metadata && object_with_metadata->footer_size_hint)
         read_options.footer_metadata_size_hint = *object_with_metadata->footer_size_hint;
 
+    /// Multipart part boundaries (from GetObjectAttributes via the identity cache), used to align
+    /// coalesced reads to part boundaries. EXPERIMENTAL: for measuring part-aligned reads. Gated by
+    /// input_format_parquet_align_reads_to_multipart_boundaries so it can be A/B-compared; when off,
+    /// the offsets stay empty and the Prefetcher coalesces as usual.
+    if (read_options.format.parquet.align_reads_to_multipart_boundaries
+        && object_with_metadata && object_with_metadata->metadata && !object_with_metadata->metadata->part_offsets.empty())
+        read_options.multipart_part_offsets.assign(
+            object_with_metadata->metadata->part_offsets.begin(),
+            object_with_metadata->metadata->part_offsets.end());
+
     if (!format_filter_info)
         format_filter_info = std::make_shared<FormatFilterInfo>();
 }

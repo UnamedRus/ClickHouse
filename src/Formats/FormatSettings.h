@@ -352,6 +352,7 @@ struct FormatSettings
         bool use_constant_column_optimization = true;
         bool use_column_index_for_constant_columns = false;
         bool fill_constant_pages = false;
+        bool align_reads_to_multipart_boundaries = false;
         double prefetch_bandwidth_hide_seconds = 0;
 
         bool enable_json_parsing = true;

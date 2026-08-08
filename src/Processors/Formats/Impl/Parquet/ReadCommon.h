@@ -4,6 +4,7 @@
 #include <Formats/FormatSettings.h>
 
 #include <algorithm>
+#include <vector>
 
 namespace DB
 {
@@ -47,6 +48,13 @@ struct ReadOptions
     /// correctness: an undershoot falls back to a second read, an overshoot reads a slightly larger
     /// (already-clamped) tail.
     size_t footer_metadata_size_hint = 0;
+
+    /// Cumulative start offsets of the object's S3 multipart-upload parts (part i covers
+    /// [multipart_part_offsets[i], multipart_part_offsets[i+1])). Learned from GetObjectAttributes
+    /// (see ObjectStorageIdentityCache) and used to align coalesced read tasks to part boundaries so
+    /// a single read never straddles two parts. Empty = unknown / single-part -> no alignment.
+    /// EXPERIMENTAL: used to measure the effect of part-boundary-aligned reads.
+    std::vector<size_t> multipart_part_offsets;
 };
 
 /// Estimate the serialized size of a parquet FileMetaData footer, to size the initial tail read.

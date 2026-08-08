@@ -193,6 +193,10 @@ private:
     size_t min_bytes_for_seek{};
     size_t bytes_per_read_task{};
 
+    /// Cumulative start offsets of the object's S3 multipart-upload parts, used to keep coalesced
+    /// read tasks within a single part. Empty = no alignment. Set once in init(), read-only after.
+    std::vector<size_t> multipart_part_offsets;
+
     /// Tail chunk retained by retainTail() to serve fully-contained ranges (Column/Offset Index)
     /// without a second read. Written once before any prefetching, read-only afterwards.
     /// [retained_tail_start, retained_tail_end) are file offsets; empty range == nothing retained.

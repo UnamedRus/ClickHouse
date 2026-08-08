@@ -9,6 +9,8 @@
 #include <Common/ProfileEvents.h>
 
 #include <shared_mutex>
+#include <algorithm>
+#include <limits>
 
 namespace DB::ErrorCodes
 {
@@ -23,6 +25,7 @@ namespace ProfileEvents
     extern const Event ParquetPrefetcherReadSeekAndRead;
     extern const Event ParquetPrefetcherReadEntireFile;
     extern const Event ParquetPrefetcherServedFromRetainedTail;
+    extern const Event ParquetPrefetcherPartAlignedTasks;
 }
 
 namespace DB::Parquet
@@ -32,6 +35,7 @@ void Prefetcher::init(ReadBuffer * reader_, const ReadOptions & options, FormatP
 {
     min_bytes_for_seek = options.min_bytes_for_seek;
     bytes_per_read_task = options.bytes_per_read_task;
+    multipart_part_offsets = options.multipart_part_offsets;
     parser_shared_resources = parser_shared_resources_;
     determineReadModeAndFileSize(reader_, options);
     range_sets.resize(1);
@@ -363,6 +367,21 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
     size_t end_idx = range_idx + 1;
     size_t total_length_of_covered_ranges = end_offset - start_offset;
 
+    /// EXPERIMENTAL part-boundary alignment: keep this coalesced task within a single S3 multipart
+    /// part, so one read never straddles a part boundary (an AWS best practice). Constrain coalescing
+    /// to [part_lo, part_hi) - the part containing the initial requested range's start. This only
+    /// limits *coalescing* across a boundary; a single requested range larger than a part is left as
+    /// is (would require splitRange). Empty offsets -> no constraint.
+    size_t part_lo = 0;
+    size_t part_hi = std::numeric_limits<size_t>::max();
+    if (!multipart_part_offsets.empty())
+    {
+        auto it = std::upper_bound(multipart_part_offsets.begin(), multipart_part_offsets.end(), start_offset);
+        part_hi = (it == multipart_part_offsets.end()) ? file_size : *it;
+        part_lo = (it == multipart_part_offsets.begin()) ? 0 : *std::prev(it);
+    }
+    bool part_boundary_constrained = false;
+
     /// Go left.
     size_t initial_offset = start_offset;
     for (size_t idx = range_idx; idx > 0; --idx)
@@ -372,6 +391,12 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
             r.start + bytes_per_read_task <= initial_offset || // task not too big
             !r.request->allow_incidental_read.load(std::memory_order_relaxed)) // range wants to be coalesced
             break;
+
+        if (r.start < part_lo) // would cross below this part's boundary
+        {
+            part_boundary_constrained = true;
+            break;
+        }
 
         const auto s = r.request->state.load(std::memory_order_relaxed);
         if (s == RequestState::State::HasRange)
@@ -408,6 +433,12 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
             !r.request->allow_incidental_read.load(std::memory_order_relaxed))
             break;
 
+        if (r.end > part_hi) // would cross above this part's boundary
+        {
+            part_boundary_constrained = true;
+            break;
+        }
+
         const auto s = r.request->state.load(std::memory_order_relaxed);
         if (s == RequestState::State::HasRange)
         {
@@ -423,6 +454,9 @@ void Prefetcher::pickRangesAndCreateTaskIfNotExists(RequestState * initial_req, 
             break;
         }
     }
+
+    if (part_boundary_constrained)
+        ProfileEvents::increment(ProfileEvents::ParquetPrefetcherPartAlignedTasks);
 
     /// Create task.
     Task & task = tasks.emplace_back();
