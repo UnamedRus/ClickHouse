@@ -63,6 +63,17 @@ public:
     /// Pass-through read from the underlying ReadBuffer.
     void readSync(char * to, size_t n, size_t offset);
 
+    /// Read several (to, n, offset) ranges concurrently: submits all but the first to io_runner and
+    /// runs the first inline, then waits for the rest. Falls back to sequential readSync when there's
+    /// no thread pool or a single range. The first exception (if any) is rethrown.
+    /// DEADLOCK SAFETY: must be called from a NON-io_runner thread (footer read at open, or the
+    /// inline consumer path in getRangeData). Calling it from a scheduled io_runner task could
+    /// deadlock (a pool thread waiting on pool tasks) - see ThreadPoolCallbackRunnerFast notes.
+    void readSyncParallel(const std::vector<std::tuple<char *, size_t, size_t>> & reads);
+
+    /// Whether split_reads_across_boundaries is enabled (used by the footer read).
+    bool splitReadsEnabled() const { return split_reads_across_boundaries; }
+
     /// Retain a tail chunk of the file (the bytes already read to parse the footer) so that any
     /// range subsequently registered and fully contained in it - notably the Column Index and
     /// Offset Index, which live just below the FileMetaData footer - is served from this in-memory
@@ -212,6 +223,14 @@ private:
     size_t read_alignment_stride = 0;
     size_t read_alignment_min_bytes = 0;
 
+    /// Split straddling reads into per-boundary segments read in parallel (see ReadOptions). Set in
+    /// init(), read-only after.
+    bool split_reads_across_boundaries = false;
+
+    /// Anti-amplification: minimum "wanted / span" fraction for a coalesced task (see ReadOptions).
+    /// 0 = off. Set in init(), read-only after.
+    double read_min_fill_ratio = 0;
+
     /// Hedged reads (tail-latency mitigation). Set in init(), read-only after. hedges_inflight is the
     /// live count, bounded by hedged_read_max_inflight.
     size_t hedged_read_threshold_ms = 0;
@@ -253,7 +272,24 @@ private:
     void pickRangesAndCreateTaskIfNotExists(RequestState *, const PrefetchHandle &, bool splitting, size_t start_offset, size_t end_offset, std::unique_lock<std::mutex> lock);
     static void decreaseTaskRefcount(Task * task, size_t amount);
     void scheduleTask(Task * task);
-    Task::State runTask(Task * task);
+    /// allow_split: whether a boundary-straddling read may be split into parallel segments (segments
+    /// run on getIOThreadPool, a separate pool - deadlock-safe from any caller). Set true ONLY on the
+    /// inline getRangeData path, where a consumer is actively blocked (prefetch didn't cover this read
+    /// in time - i.e. ramp-up / prefetch behind). Prefetched (scheduled) reads pass false: no one is
+    /// waiting on them, so splitting would only add GETs. This makes splitting self-limiting - it
+    /// happens early / when starved and stops once prefetch keeps the pipeline full.
+    Task::State runTask(Task * task, bool allow_split = false);
+    /// File-offset split points strictly inside (offset, offset+length), from multipart_part_offsets
+    /// (preferred) or read_alignment_stride. Empty = the range fits within one part / no boundaries.
+    std::vector<size_t> splitPointsForRange(size_t offset, size_t length) const;
+    /// Whether the byte range [lo, hi) contains a part boundary strictly inside - i.e. reading it
+    /// would straddle a part. Used to stop coalescing from bridging a gap across a boundary.
+    bool gapCrossesBoundary(size_t lo, size_t hi) const;
+    /// Anti-amplification: whether extending a task (currently covering [start_offset, end_offset) with
+    /// `wanted` bytes of actual ranges) to include range r would drop the task's wanted/span fraction
+    /// below read_min_fill_ratio (only for gaps above a small floor). Used to stop coalescing from
+    /// amplifying a tiny scattered column into a huge mostly-filler read.
+    bool fillRatioWouldBreak(size_t wanted, size_t start_offset, size_t end_offset, const RangeState & r) const;
     [[noreturn]] void rethrowException(Task * task);
 
     /// Issue a duplicate (hedged) read of `task`'s range when the primary is slow, to cut tail

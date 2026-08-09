@@ -92,8 +92,9 @@ IcebergDataObjectInfo::IcebergDataObjectInfo(
 #if USE_PARQUET
     /// Precompute a footer-size hint from the manifest stats so the parquet reader can fetch the
     /// FileMetaData in a single tail read (see Parquet::estimateParquetFooterSize). Parquet only;
-    /// the hint is ignored by other formats. row-group count is estimated from record_count because
-    /// split_offsets are not parsed. Only affects read count, never correctness.
+    /// the hint is ignored by other formats. The row-group count comes from the manifest's
+    /// split_offsets (one per row group) when present - accurate even for byte-split row groups -
+    /// and falls back to a record_count/1M guess otherwise. Only affects read count, never correctness.
     const auto & entry = *data_manifest_file_entry_->parsed_entry;
     if (entry.file_format == "PARQUET")
     {
@@ -102,7 +103,9 @@ IcebergDataObjectInfo::IcebergDataObjectInfo(
         {
             constexpr size_t rows_per_row_group_guess = 1'000'000;
             size_t rows = size_t(std::max<Int64>(entry.record_count, 0));
-            size_t num_row_groups = std::max<size_t>(1, (rows + rows_per_row_group_guess - 1) / rows_per_row_group_guess);
+            size_t num_row_groups = !entry.split_offsets.empty()
+                ? entry.split_offsets.size()
+                : std::max<size_t>(1, (rows + rows_per_row_group_guess - 1) / rows_per_row_group_guess);
             size_t bounds_bytes = 0;
             for (const auto & [field_id, bounds] : entry.value_bounds)
                 bounds_bytes += estimateBoundFieldBytes(bounds.first) + estimateBoundFieldBytes(bounds.second);

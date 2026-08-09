@@ -94,6 +94,10 @@ struct ParsedManifestFileEntry : boost::noncopyable
     Int64 record_count;
     Int64 file_size_in_bytes;
 
+    /// Optional per-file row-group split offsets (Parquet: byte offset of each row group). Used only
+    /// to size the parquet footer tail read (see IcebergDataObjectInfo). Empty if not present.
+    std::vector<Int64> split_offsets;
+
     ParsedManifestFileEntry(
         FileContentType content_type_,
         IcebergPathFromMetadata file_path_key_,
@@ -110,7 +114,8 @@ struct ParsedManifestFileEntry : boost::noncopyable
         std::optional<std::vector<Int32>> equality_ids_,
         std::optional<Int32> sort_order_id_,
         Int64 record_count_,
-        Int64 file_size_in_bytes_)
+        Int64 file_size_in_bytes_,
+        std::vector<Int64> split_offsets_ = {})
         : content_type(content_type_)
         , file_path_key(std::move(file_path_key_))
         , row_number(row_number_)
@@ -127,6 +132,7 @@ struct ParsedManifestFileEntry : boost::noncopyable
         , sort_order_id(sort_order_id_)
         , record_count(record_count_)
         , file_size_in_bytes(file_size_in_bytes_)
+        , split_offsets(std::move(split_offsets_))
     {
     }
 };

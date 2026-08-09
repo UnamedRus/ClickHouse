@@ -65,6 +65,24 @@ struct ReadOptions
     /// segment would be smaller than this many bytes (allow the straddle instead of a tiny read).
     size_t read_alignment_min_bytes = 0;
 
+    /// Split a single read that straddles a part boundary into per-part segments read in parallel,
+    /// instead of one straddling GET. Measured on same-region AWS S3: a boundary-crossing ranged GET
+    /// pays ~one extra RTT mid-stream, so two aligned reads fetched concurrently are ~2.5x faster.
+    /// Boundaries come from multipart_part_offsets (preferred) or read_alignment_stride. Also enables
+    /// the speculative-parallel footer read (last 2 MiB + the rest, fired concurrently). 0 = off.
+    /// EXPERIMENTAL. Only helps latency-bound / critical-path reads; hidden by high concurrency.
+    bool split_reads_across_boundaries = false;
+
+    /// Anti-amplification guard for coalescing: don't bridge a gap between two wanted ranges if the
+    /// resulting read task would be less than this fraction "wanted" (i.e. mostly filler bytes).
+    /// Coalescing normally reads through gaps shorter than min_bytes_for_seek to save a seek, but many
+    /// such sub-threshold gaps can accumulate into a task that is almost entirely unwanted bytes -
+    /// e.g. reading a tiny, scattered (RLE/near-constant) column drags in the neighbouring columns and
+    /// amplifies a few KB into hundreds of MB. This caps that: a task can never be more than
+    /// 1/read_min_fill_ratio times its wanted bytes. 0 = off (pure gap-size coalescing). Gaps below a
+    /// small absolute floor are always bridged regardless, so dense reads are unaffected. EXPERIMENTAL.
+    double read_min_fill_ratio = 0;
+
     /// Hedged reads (tail-latency mitigation): if a read a consumer is blocked on hasn't completed
     /// within hedged_read_threshold_ms, issue a duplicate read and take whichever returns first.
     /// 0 = off. Only reads no larger than hedged_read_max_bytes are hedged (latency, not throughput),

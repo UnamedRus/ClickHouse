@@ -74,9 +74,22 @@ ParquetV3BlockInputFormat::ParquetV3BlockInputFormat(
             object_with_metadata->metadata->part_offsets.begin(),
             object_with_metadata->metadata->part_offsets.end());
 
-    /// Fixed-grid alignment (no per-file layout needed) + the anti-fragmentation min-segment guard.
-    read_options.read_alignment_stride = read_options.format.parquet.read_alignment_bytes;
+    /// Fixed-grid alignment stride (used when real per-file part offsets are unavailable). Default to
+    /// 16 MiB when unset: it's the S3 multipart part size of ClickHouse's own writer (whose adaptive
+    /// 16/32/64 MiB ramp keeps every part boundary a multiple of 16 MiB) and of Hadoop S3A (64/128),
+    /// so a 16 MiB grid never straddles a real boundary for those (exact for 16 MiB parts, harmless
+    /// over-split for bigger); ~50% fewer straddles for 8 MiB (aws cli). Only misses non-16 sizes
+    /// (e.g. delta-rs 10 MiB) - set input_format_parquet_read_alignment_bytes explicitly for those.
+    read_options.read_alignment_stride = read_options.format.parquet.read_alignment_bytes
+        ? read_options.format.parquet.read_alignment_bytes
+        : (16ul << 20);
     read_options.read_alignment_min_bytes = read_options.format.parquet.read_alignment_min_bytes;
+
+    /// Split boundary-straddling reads into parallel per-part segments (+ speculative-parallel footer).
+    read_options.split_reads_across_boundaries = read_options.format.parquet.split_reads_across_part_boundaries;
+
+    /// Anti-amplification: cap how much filler coalescing may read to bridge gaps in a sparse column.
+    read_options.read_min_fill_ratio = read_options.format.parquet.read_min_fill_ratio;
 
     /// Hedged reads (tail-latency mitigation).
     read_options.hedged_read_threshold_ms = read_options.format.parquet.hedged_read_threshold_ms;

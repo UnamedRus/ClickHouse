@@ -225,6 +225,8 @@ FormatSettings getFormatSettings(const ContextPtr & context, const Settings & se
     format_settings.parquet.align_reads_to_multipart_boundaries = settings[Setting::input_format_parquet_align_reads_to_multipart_boundaries];
     format_settings.parquet.read_alignment_bytes = settings[Setting::input_format_parquet_read_alignment_bytes];
     format_settings.parquet.read_alignment_min_bytes = settings[Setting::input_format_parquet_read_alignment_min_bytes];
+    format_settings.parquet.split_reads_across_part_boundaries = settings[Setting::input_format_parquet_split_reads_across_part_boundaries];
+    format_settings.parquet.read_min_fill_ratio = static_cast<double>(settings[Setting::input_format_parquet_read_min_fill_ratio]);
     format_settings.parquet.hedged_read_threshold_ms = settings[Setting::input_format_parquet_hedged_read_threshold_ms];
     format_settings.parquet.hedged_read_max_bytes = settings[Setting::input_format_parquet_hedged_read_max_bytes];
     format_settings.parquet.hedged_read_max_inflight = settings[Setting::input_format_parquet_hedged_read_max_inflight];

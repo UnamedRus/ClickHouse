@@ -43,6 +43,7 @@ namespace ProfileEvents
     extern const Event ParquetColumnsFilterExpression;
     extern const Event ParquetConstantColumnChunks;
     extern const Event ParquetConstantColumnSubchunks;
+    extern const Event ParquetPrefetcherFooterSpeculativeParallel;
 }
 
 namespace DB::Parquet
@@ -209,7 +210,26 @@ parq::FileMetaData Reader::readFileMetaData(Prefetcher & prefetcher, size_t foot
     /// footer turns out larger, the code below reads the exact remainder (one extra read).
     size_t initial_read_size = std::min(file_size, footer_size_hint ? footer_size_hint : (64ul << 10));
     PODArray<char> buf(initial_read_size);
-    prefetcher.readSync(buf.data(), initial_read_size, file_size - initial_read_size);
+    /// Speculative-parallel footer read: when the hint is large (> 2 MiB) we don't know if the footer
+    /// really needs the whole hinted tail, but tail reads up to ~2 MiB are latency-flat while a single
+    /// big read is bandwidth-bound. So fire two concurrent reads - the last 2 MiB (always holds the
+    /// footer length + magic, and the entire footer for small footers) and the preceding rest of the
+    /// hinted tail. This keeps the second request already in flight if the footer overflows 2 MiB,
+    /// avoiding a sequential extra round-trip; the buffer layout is identical to the single read.
+    static constexpr size_t footer_spec_tail = 2ul << 20;
+    if (prefetcher.splitReadsEnabled() && initial_read_size > footer_spec_tail)
+    {
+        size_t rest = initial_read_size - footer_spec_tail;
+        prefetcher.readSyncParallel({
+            std::make_tuple(buf.data(), rest, file_size - initial_read_size),
+            std::make_tuple(buf.data() + rest, footer_spec_tail, file_size - footer_spec_tail),
+        });
+        ProfileEvents::increment(ProfileEvents::ParquetPrefetcherFooterSpeculativeParallel);
+    }
+    else
+    {
+        prefetcher.readSync(buf.data(), initial_read_size, file_size - initial_read_size);
+    }
 
     if (memcmp(buf.data() + initial_read_size - 4, "PAR1", 4) != 0)
         throw Exception(ErrorCodes::INCORRECT_DATA, "Not a Parquet file (wrong magic bytes at the end of file)");

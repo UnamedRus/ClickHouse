@@ -1458,6 +1458,10 @@ The server successfully detected this situation and will download merged part fr
     M(ParquetPrefetcherAlignmentSkippedSmall, "The number of times DB::Parquet::Prefetcher skipped read alignment because the aligned segment would be smaller than the configured minimum (anti-fragmentation)", ValueType::Number) \
     M(ParquetPrefetcherHedgedReads, "The number of hedged (duplicate) reads issued by DB::Parquet::Prefetcher to cut read tail latency", ValueType::Number) \
     M(ParquetPrefetcherHedgedWins, "The number of hedged reads that produced the result used (beat or replaced the primary read) in DB::Parquet::Prefetcher", ValueType::Number) \
+    M(ParquetPrefetcherSplitReadTasks, "The number of read tasks that DB::Parquet::Prefetcher split into per-part-boundary segments read in parallel (to avoid a boundary-straddling GET)", ValueType::Number) \
+    M(ParquetPrefetcherSplitReadSegments, "The total number of parallel segment reads produced by splitting boundary-straddling read tasks in DB::Parquet::Prefetcher", ValueType::Number) \
+    M(ParquetPrefetcherFooterSpeculativeParallel, "The number of parquet footers read via a speculative-parallel tail read (last chunk + the rest fired concurrently) by DB::Parquet::Prefetcher", ValueType::Number) \
+    M(ParquetPrefetcherFillRatioLimitedTasks, "The number of times DB::Parquet::Prefetcher stopped extending a coalesced read task because bridging the next gap would make the task mostly unwanted filler bytes (read_min_fill_ratio guard)", ValueType::Number) \
     M(ParquetRowsFilterExpression, "The total number of rows that were passed through filter", ValueType::Number) \
     M(ParquetColumnsFilterExpression, "The total number of columns that were passed through filter", ValueType::Number) \
     M(FilterTransformPassedRows, "Number of rows that passed the filter in the query", ValueType::Number) \

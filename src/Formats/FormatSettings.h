@@ -355,6 +355,8 @@ struct FormatSettings
         bool align_reads_to_multipart_boundaries = false;
         UInt64 read_alignment_bytes = 0;
         UInt64 read_alignment_min_bytes = 1048576;
+        bool split_reads_across_part_boundaries = false;
+        double read_min_fill_ratio = 0;
         UInt64 hedged_read_threshold_ms = 0;
         UInt64 hedged_read_max_bytes = 4194304;
         UInt64 hedged_read_max_inflight = 4;
