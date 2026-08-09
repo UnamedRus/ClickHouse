@@ -546,16 +546,26 @@ ObjectMetadata S3ObjectStorage::getObjectMetadata(const std::string & path, bool
     const bool identity_only = !with_tags;
     const String identity_key = uri.bucket + "/" + path;
 
+    /// The identity cache is owned by the global Context and sized from server settings. Low-level
+    /// object-storage code can run before/without a global context (e.g. early startup, standalone
+    /// disk use); a null pointer simply means "no cache" and we fall back to an uncached request.
+    ObjectStorageIdentityCachePtr identity_cache;
     if (identity_only)
     {
-        if (auto cached = ObjectStorageIdentityCache::instance().tryGet(identity_key))
+        if (auto global_context = Context::getGlobalContextInstance())
+            identity_cache = global_context->getObjectStorageIdentityCache();
+
+        if (identity_cache)
         {
-            ObjectMetadata result;
-            result.size_bytes = cached->size;
-            result.is_size_known = cached->is_size_known;
-            result.etag = cached->etag;
-            result.part_offsets = cached->part_offsets;
-            return result;
+            if (auto cached = identity_cache->tryGet(identity_key))
+            {
+                ObjectMetadata result;
+                result.size_bytes = cached->size;
+                result.is_size_known = cached->is_size_known;
+                result.etag = cached->etag;
+                result.part_offsets = cached->part_offsets;
+                return result;
+            }
         }
     }
 
@@ -613,8 +623,8 @@ ObjectMetadata S3ObjectStorage::getObjectMetadata(const std::string & path, bool
         }
     }
 
-    if (identity_only)
-        ObjectStorageIdentityCache::instance().set(
+    if (identity_cache)
+        identity_cache->set(
             identity_key,
             ObjectStorageIdentity{result.etag, result.size_bytes, result.is_size_known, result.part_offsets});
 
