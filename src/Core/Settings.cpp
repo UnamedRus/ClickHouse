@@ -7438,6 +7438,9 @@ Default partition strategy for file like engines.
     DECLARE(Bool, use_iceberg_partition_pruning, true, R"(
 Use Iceberg partition pruning for Iceberg tables
 )", 0) \
+    DECLARE(UInt64, iceberg_metadata_processing_threads, 1, R"(
+Number of threads used to process Iceberg manifest files (deserialize manifest entries and evaluate min/max pruning) when building the list of data files to read. `1` keeps the legacy single-threaded producer. Values greater than `1` fan the per-entry pruning across that many threads, which shortens the metadata wait for tables with many data files (the pruning cost is `O(total files)`, not `O(surviving files)`, and is otherwise serial). `0` means auto (use the number of available CPU cores).
+)", 0) \
     DECLARE(Bool, allow_deprecated_snowflake_conversion_functions, false, R"(
 Functions `snowflakeToDateTime`, `snowflakeToDateTime64`, `dateTimeToSnowflake`, and `dateTime64ToSnowflake` are deprecated and disabled by default.
 Please use functions `snowflakeIDToDateTime`, `snowflakeIDToDateTime64`, `dateTimeToSnowflakeID`, and `dateTime64ToSnowflakeID` instead.

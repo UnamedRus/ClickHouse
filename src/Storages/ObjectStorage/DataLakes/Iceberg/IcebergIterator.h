@@ -48,6 +48,13 @@ public:
 
     std::optional<DB::Iceberg::ProcessedManifestFileEntryPtr> next();
 
+    /// Advance to the next manifest file of the matching content type and return an iterator over
+    /// its entries (whose `next()` is safe to call from several threads at once), or nullptr when
+    /// no manifest files are left. Not thread-safe itself: the caller serializes the advance (it
+    /// mutates `manifest_file_index` and fetches the manifest file), then hands the returned
+    /// iterator to the parallel workers.
+    Iceberg::ManifestIteratorPtr nextManifestFile();
+
 private:
     ObjectStoragePtr object_storage;
     std::shared_ptr<const ActionsDAG> filter_dag;
@@ -91,7 +98,17 @@ private:
     Iceberg::SingleThreadIcebergKeysIterator data_files_iterator;
     Iceberg::SingleThreadIcebergKeysIterator deletes_iterator;
     ConcurrentBoundedQueue<Iceberg::ProcessedManifestFileEntryPtr> blocking_queue;
+    /// Legacy single-threaded producer (iceberg_metadata_processing_threads == 1).
     std::unique_ptr<ThreadFromGlobalPool> producer_task;
+    /// Parallel producers (iceberg_metadata_processing_threads > 1). They share the manifest-file
+    /// cursor of `data_files_iterator` through `manifest_advance_mutex` and drain each manifest
+    /// file's entries concurrently (ManifestFileIterator::next() is thread-safe).
+    std::vector<ThreadFromGlobalPool> producer_threads;
+    std::mutex manifest_advance_mutex;
+    Iceberg::ManifestIteratorPtr current_producer_manifest TSA_GUARDED_BY(manifest_advance_mutex);
+    bool manifest_source_exhausted TSA_GUARDED_BY(manifest_advance_mutex) = false;
+    /// Number of parallel producer threads still running; the last one to finish closes the queue.
+    std::atomic<size_t> producers_remaining{0};
     IDataLakeMetadata::FileProgressCallback callback;
     std::vector<Iceberg::ProcessedManifestFileEntryPtr> position_deletes_files;
     std::vector<Iceberg::ProcessedManifestFileEntryPtr> equality_deletes_files;

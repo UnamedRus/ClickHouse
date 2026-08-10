@@ -41,6 +41,7 @@ const VersionToSettingsChangesMap & getSettingsChangesHistory()
         /// Note: please check if the key already exists to prevent duplicate entries.
         addSettingsChanges(settings_changes_history, "26.6",
         {
+            {"iceberg_metadata_processing_threads", 1, 1, "New setting: number of threads used to prune Iceberg manifest entries when building the list of data files. Default 1 keeps the legacy single-threaded producer."},
             {"input_format_parquet_use_constant_column_optimization", false, true, "New setting: when a Parquet column chunk provably holds a single value in every row (per its min/max statistics), materialize that value directly instead of reading and decoding the column's data pages (reader v3)."},
             {"input_format_parquet_prefetch_bandwidth_hide_seconds", 0, 0, "New setting: read back-pressure for the Parquet v3 reader; stop prefetching compressed data pages once in-flight compressed bytes exceed this many seconds of measured read throughput. 0 (the default and the pre-existing behavior) disables the back-pressure."},
             {"input_format_parquet_use_column_index_for_constant_columns", false, false, "New setting: load the Parquet Column Index for read columns without a predicate so the constant-column optimization can skip data pages that are single-valued over a row subgroup. Disabled by default (costs a small extra read)."},
