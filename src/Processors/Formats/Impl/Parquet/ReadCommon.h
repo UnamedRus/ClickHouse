@@ -88,6 +88,7 @@ struct ReadOptions
     /// 0 = off. Only reads no larger than hedged_read_max_bytes are hedged (latency, not throughput),
     /// and at most hedged_read_max_inflight hedges run concurrently (cost cap). EXPERIMENTAL.
     size_t hedged_read_threshold_ms = 0;
+    size_t hedged_read_ttfb_threshold_ms = 0;
     size_t hedged_read_max_bytes = 0;
     size_t hedged_read_max_inflight = 0;
 };

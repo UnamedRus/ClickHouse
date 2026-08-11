@@ -228,6 +228,7 @@ FormatSettings getFormatSettings(const ContextPtr & context, const Settings & se
     format_settings.parquet.split_reads_across_part_boundaries = settings[Setting::input_format_parquet_split_reads_across_part_boundaries];
     format_settings.parquet.read_min_fill_ratio = static_cast<double>(settings[Setting::input_format_parquet_read_min_fill_ratio]);
     format_settings.parquet.hedged_read_threshold_ms = settings[Setting::input_format_parquet_hedged_read_threshold_ms];
+    format_settings.parquet.hedged_read_ttfb_threshold_ms = settings[Setting::input_format_parquet_hedged_read_ttfb_threshold_ms];
     format_settings.parquet.hedged_read_max_bytes = settings[Setting::input_format_parquet_hedged_read_max_bytes];
     format_settings.parquet.hedged_read_max_inflight = settings[Setting::input_format_parquet_hedged_read_max_inflight];
     format_settings.parquet.prefetch_bandwidth_hide_seconds = settings[Setting::input_format_parquet_prefetch_bandwidth_hide_seconds];

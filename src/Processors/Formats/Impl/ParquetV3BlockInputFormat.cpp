@@ -93,6 +93,7 @@ ParquetV3BlockInputFormat::ParquetV3BlockInputFormat(
 
     /// Hedged reads (tail-latency mitigation).
     read_options.hedged_read_threshold_ms = read_options.format.parquet.hedged_read_threshold_ms;
+    read_options.hedged_read_ttfb_threshold_ms = read_options.format.parquet.hedged_read_ttfb_threshold_ms;
     read_options.hedged_read_max_bytes = read_options.format.parquet.hedged_read_max_bytes;
     read_options.hedged_read_max_inflight = read_options.format.parquet.hedged_read_max_inflight;
 

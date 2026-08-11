@@ -60,8 +60,10 @@ public:
     /// The returned pointer is valid as long as the PrefetchHandle is alive.
     std::span<const char> getRangeData(const PrefetchHandle & request);
 
-    /// Pass-through read from the underlying ReadBuffer.
-    void readSync(char * to, size_t n, size_t offset);
+    /// Pass-through read from the underlying ReadBuffer. When `notify_first_byte` is set (only on the
+    /// primary read path), notifies its `first_byte` when the underlying read reports its first bytes,
+    /// so TTFB-triggered hedging can tell a stalled connection from a slow-but-progressing transfer.
+    void readSync(char * to, size_t n, size_t offset, Task * notify_first_byte = nullptr);
 
     /// Read several (to, n, offset) ranges concurrently: submits all but the first to io_runner and
     /// runs the first inline, then waits for the rest. Falls back to sequential readSync when there's
@@ -175,6 +177,11 @@ private:
         /// Notified when the state changes from Running to Done or Exception (by the primary read, or
         /// by a hedge read - whichever finishes first).
         CompletionNotification completion;
+        /// Notified when the primary read receives its first byte (from the readBigAt progress
+        /// callback), and unconditionally when the primary read finishes - so a waiter is always
+        /// released even if the read produced no progress callback. Used by TTFB-triggered hedging
+        /// (hedged_read_ttfb_threshold_ms): a hedge fires only if no first byte arrives in time.
+        CompletionNotification first_byte;
         std::exception_ptr exception;
 
         /// Hedging (tail-latency mitigation): a second read of the same range, raced against the
@@ -234,6 +241,7 @@ private:
     /// Hedged reads (tail-latency mitigation). Set in init(), read-only after. hedges_inflight is the
     /// live count, bounded by hedged_read_max_inflight.
     size_t hedged_read_threshold_ms = 0;
+    size_t hedged_read_ttfb_threshold_ms = 0;
     size_t hedged_read_max_bytes = 0;
     size_t hedged_read_max_inflight = 0;
     std::atomic<size_t> hedges_inflight {0};

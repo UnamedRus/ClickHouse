@@ -358,6 +358,7 @@ struct FormatSettings
         bool split_reads_across_part_boundaries = false;
         double read_min_fill_ratio = 0;
         UInt64 hedged_read_threshold_ms = 0;
+        UInt64 hedged_read_ttfb_threshold_ms = 0;
         UInt64 hedged_read_max_bytes = 4194304;
         UInt64 hedged_read_max_inflight = 4;
         double prefetch_bandwidth_hide_seconds = 0;

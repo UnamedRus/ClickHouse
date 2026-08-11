@@ -54,6 +54,7 @@ void Prefetcher::init(ReadBuffer * reader_, const ReadOptions & options, FormatP
     split_reads_across_boundaries = options.split_reads_across_boundaries;
     read_min_fill_ratio = options.read_min_fill_ratio;
     hedged_read_threshold_ms = options.hedged_read_threshold_ms;
+    hedged_read_ttfb_threshold_ms = options.hedged_read_ttfb_threshold_ms;
     hedged_read_max_bytes = options.hedged_read_max_bytes;
     hedged_read_max_inflight = options.hedged_read_max_inflight;
     parser_shared_resources = parser_shared_resources_;
@@ -127,16 +128,24 @@ void Prefetcher::determineReadModeAndFileSize(ReadBuffer * reader_, const ReadOp
     }
 }
 
-void Prefetcher::readSync(char * to, size_t n, size_t offset)
+void Prefetcher::readSync(char * to, size_t n, size_t offset, Task * notify_first_byte)
 {
     if (offset > file_size || n > file_size - offset)
         throw Exception(ErrorCodes::LOGICAL_ERROR, "File read out of bounds: offset {}, length {}, file size {}", offset, n, file_size);
+
+    /// First-byte signal for TTFB-triggered hedging: notify as soon as the underlying read reports
+    /// progress (its first bytes). notify() is idempotent, so firing on every progress step is fine.
+    /// Callback return is a cancel flag (true => stop the read); we only observe first-byte progress,
+    /// so always return false to let the read run to completion.
+    std::function<bool(size_t)> progress_callback;
+    if (notify_first_byte)
+        progress_callback = [notify_first_byte](size_t) { notify_first_byte->first_byte.notify(); return false; };
 
     size_t nread = 0;
     switch (read_mode)
     {
         case ReadMode::RandomRead:
-            nread = reader->readBigAt(to, n, offset, /*progress_callback*/ nullptr);
+            nread = reader->readBigAt(to, n, offset, progress_callback);
             ProfileEvents::increment(ProfileEvents::ParquetPrefetcherReadRandomRead);
             break;
         case ReadMode::SeekAndRead:
@@ -695,8 +704,13 @@ void Prefetcher::scheduleTask(Task * task)
 
 bool Prefetcher::hedgeReadSync(Task * task)
 {
-    /// Wait up to the threshold for the primary; if it finishes in time, no hedge is needed.
-    if (task->completion.wait_for(hedged_read_threshold_ms))
+    /// Wait for the primary before hedging. With a TTFB threshold set, wait for the primary's FIRST
+    /// BYTE (`first_byte` is also notified on completion, so a finished primary releases us too);
+    /// this hedges a stalled connection without hedging a slow-but-progressing large transfer.
+    /// Otherwise fall back to the legacy total-completion threshold.
+    const bool use_ttfb = hedged_read_ttfb_threshold_ms > 0;
+    if (use_ttfb ? task->first_byte.wait_for(hedged_read_ttfb_threshold_ms)
+                 : task->completion.wait_for(hedged_read_threshold_ms))
         return false;
 
     /// Primary is slow. Only one consumer hedges a given task.
@@ -755,7 +769,7 @@ std::span<const char> Prefetcher::getRangeData(const PrefetchHandle & request)
             /// read to cut the S3 GET tail. Eligible only for real (non-cached) remote reads no
             /// larger than the size cap. hedgeReadSync waits up to the threshold itself.
             bool served_by_hedge = false;
-            if (hedged_read_threshold_ms > 0 && read_mode == ReadMode::RandomRead
+            if ((hedged_read_ttfb_threshold_ms > 0 || hedged_read_threshold_ms > 0) && read_mode == ReadMode::RandomRead
                 && !task->cached_region.has_value() && task->length > 0
                 && (hedged_read_max_bytes == 0 || task->length <= hedged_read_max_bytes))
             {
@@ -874,7 +888,7 @@ Prefetcher::Task::State Prefetcher::runTask(Task * task, bool allow_split)
             }
             else
             {
-                readSync(task->buf.data(), task->length, task->offset);
+                readSync(task->buf.data(), task->length, task->offset, /*notify_first_byte=*/ task);
             }
         }
         total_bytes_read.fetch_add(task->length, std::memory_order_relaxed);
@@ -899,6 +913,9 @@ Prefetcher::Task::State Prefetcher::runTask(Task * task, bool allow_split)
         task->hedge_buf = {};
     }
 
+    /// Release TTFB waiters too, in case the read produced no progress callback (or took the cached
+    /// / split path): a finished primary must never leave a hedge waiting on first_byte.
+    task->first_byte.notify();
     task->completion.notify();
 
     return s;

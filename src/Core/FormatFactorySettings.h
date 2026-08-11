@@ -234,6 +234,9 @@ Experimental. Anti-amplification guard for Parquet v3 read coalescing. Coalescin
     DECLARE(UInt64, input_format_parquet_hedged_read_threshold_ms, 0, R"(
 Experimental. Tail-latency mitigation for the Parquet v3 reader on remote object storage: if a read a query is blocked on has not completed within this many milliseconds, issue a duplicate (hedged) request and use whichever returns first. Cuts the S3 GET p99 tail at the cost of a few extra requests. 0 disables. Only reads no larger than `input_format_parquet_hedged_read_max_bytes` are hedged, and at most `input_format_parquet_hedged_read_max_inflight` hedges run at once.
 )", 0) \
+    DECLARE(UInt64, input_format_parquet_hedged_read_ttfb_threshold_ms, 0, R"(
+Experimental. Time-to-first-byte variant of `input_format_parquet_hedged_read_threshold_ms`: issue a duplicate (hedged) Parquet read when the primary read has not received its first byte within this many milliseconds, rather than when its total time exceeds a budget. Because time-to-first-byte is largely independent of read size, this triggers on a stalled/slow connection without hedging legitimately large transfers that stream normally. When set (> 0) it takes precedence over `input_format_parquet_hedged_read_threshold_ms`. 0 disables. Still bounded by `input_format_parquet_hedged_read_max_bytes` and `input_format_parquet_hedged_read_max_inflight`.
+)", 0) \
     DECLARE(UInt64, input_format_parquet_hedged_read_max_bytes, 4194304, R"(
 Experimental. Only hedge Parquet reads (see `input_format_parquet_hedged_read_threshold_ms`) no larger than this - hedging targets latency of small/critical reads, not throughput of large coalesced reads. 0 = no size limit. Default 4 MiB.
 )", 0) \
