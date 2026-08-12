@@ -109,3 +109,4 @@ namespaces='namespace,namespace.*'
 ```
 
 The default value is '*', which means all namespaces are included.
+To authenticate without sharing a client secret, set `onelake_bearer_token` to a pre-obtained bearer token (scoped to `https://storage.azure.com`) instead of `onelake_client_id`/`onelake_client_secret`. ClickHouse does not refresh the token, so the database must be recreated after it expires.
