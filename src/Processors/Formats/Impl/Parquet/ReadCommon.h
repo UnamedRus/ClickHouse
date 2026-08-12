@@ -106,13 +106,17 @@ inline size_t estimateParquetFooterSize(size_t num_columns, size_t num_row_group
     /// triggers the reader's existing second-read fallback.
     constexpr size_t fixed_overhead = 4096;      /// schema + file-level key/value metadata
     constexpr size_t per_row_group = 64;         /// RowGroupMetaData wrapper
-    constexpr size_t per_column_chunk = 112;     /// ColumnMetaData fixed fields (offsets, sizes, ...)
+    /// Thrift-compact ColumnMetaData per chunk (offsets, sizes, encodings, short path). Measured
+    /// ~51 B/chunk on a 437-column / 8-row-group / 1 GiB file (large offsets -> ~5 B varints);
+    /// 64 leaves headroom for longer column names. The old 112 overshot the whole footer ~2.2x
+    /// because this term dominates wide/few-stats footers (num_columns * this * num_row_groups).
+    constexpr size_t per_column_chunk = 64;      /// ColumnMetaData fixed fields (offsets, sizes, ...)
     constexpr size_t floor_size = 64ul << 10;    /// never smaller than the default speculative read
     constexpr size_t cap_size = 16ul << 20;      /// don't speculatively read an enormous tail
 
     size_t est = fixed_overhead
         + num_row_groups * (per_row_group + num_columns * per_column_chunk + bounds_bytes);
-    est += est / 3; /// ~1.3x safety for column names and Iceberg-vs-parquet truncation-length skew
+    est += est / 4; /// ~1.25x safety for column names and Iceberg-vs-parquet truncation-length skew
     return std::clamp(est, floor_size, cap_size);
 }
 
