@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <Core/SettingsEnums.h>
 #include <Interpreters/SystemLog.h>
 #include <Storages/ColumnsDescription.h>
@@ -27,9 +29,13 @@ struct IcebergMetadataLogElement
     void appendToBlock(MutableColumns & columns) const;
 };
 
+/// `get_row` is evaluated lazily - only if `row_log_level` is actually enabled by the
+/// `iceberg_metadata_log_level` setting. Serializing the metadata row (e.g. a manifest entry) is
+/// expensive and, on wide tables with many manifest entries, was dominating query planning when
+/// done eagerly for every entry with logging off. Pass a closure that builds the string on demand.
 void insertRowToLogTable(
     const ContextPtr & local_context,
-    String row,
+    std::function<String()> get_row,
     IcebergMetadataLogLevel row_log_level,
     const String & table_path,
     const Iceberg::IcebergPathFromMetadata & file_path,
