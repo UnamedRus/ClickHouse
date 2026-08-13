@@ -1327,7 +1327,9 @@ std::unique_ptr<ReadBufferFromFileBase> createReadBuffer(
     /// 2. object etag suggests a cache key in case we use filesystem cache
     /// 3. object etag as a cache key for parquet metadata caching
     if (!object_info.metadata)
-        object_info.metadata = object_storage->getObjectMetadata(object_info.getPath(), /*with_tags=*/ false);
+        object_info.metadata = object_storage->getObjectMetadata(
+            object_info.getPath(), /*with_tags=*/ false,
+            /*fetch_part_offsets=*/ effective_read_settings.object_storage_identity_cache_fetch_part_offsets);
 
     if (use_page_cache && object_info.metadata->etag.empty())
     {

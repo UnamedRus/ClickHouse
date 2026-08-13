@@ -351,6 +351,7 @@ namespace Setting
     extern const SettingsBool use_page_cache_for_disks_without_file_cache;
     extern const SettingsBool use_page_cache_for_local_disks;
     extern const SettingsBool use_page_cache_for_object_storage;
+    extern const SettingsBool object_storage_identity_cache_fetch_part_offsets;
     extern const SettingsBool use_page_cache_with_distributed_cache;
     extern const SettingsUInt64 use_structure_from_insertion_table_in_table_functions;
     extern const SettingsString workload;
@@ -8016,6 +8017,7 @@ ReadSettings Context::getReadSettings() const
     res.use_page_cache_with_distributed_cache = settings_ref[Setting::use_page_cache_with_distributed_cache];
     res.use_page_cache_for_local_disks = settings_ref[Setting::use_page_cache_for_local_disks];
     res.use_page_cache_for_object_storage = settings_ref[Setting::use_page_cache_for_object_storage];
+    res.object_storage_identity_cache_fetch_part_offsets = settings_ref[Setting::object_storage_identity_cache_fetch_part_offsets];
     res.use_reader_executor = settings_ref[Setting::use_reader_executor];
     res.page_cache_settings.read_if_exists_otherwise_bypass
         = settings_ref[Setting::read_from_page_cache_if_exists_otherwise_bypass_cache];

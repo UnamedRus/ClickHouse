@@ -536,7 +536,7 @@ std::optional<ObjectMetadata> S3ObjectStorage::tryGetObjectMetadata(const std::s
     return result;
 }
 
-ObjectMetadata S3ObjectStorage::getObjectMetadata(const std::string & path, bool with_tags) const
+ObjectMetadata S3ObjectStorage::getObjectMetadata(const std::string & path, bool with_tags, bool fetch_part_offsets) const
 {
     /// When the caller only needs identity (size / etag / part offsets, not tags or user metadata) we
     /// take a fast path: consult the process-wide identity cache to skip the metadata request entirely
@@ -574,7 +574,17 @@ ObjectMetadata S3ObjectStorage::getObjectMetadata(const std::string & path, bool
     auto fetch = [&](const S3::Client & c) -> S3::ObjectInfo
     {
         if (identity_only)
-            return S3::getObjectIdentity(c, uri.bucket, path, /*version_id=*/ {});
+        {
+            /// Default (fetch_part_offsets = false): a plain HEAD returns size + etag, which is all the
+            /// read path needs (etag keys the page / filesystem / parquet-metadata caches, size drives
+            /// prefetch). Only when the caller wants the multipart layout for part-aligned reads do we
+            /// pay the heavier GetObjectAttributes, which also returns per-part sizes; it falls back to
+            /// a HEAD internally if the API is unsupported or denied. This keeps a cold, cache-empty
+            /// lake scan on the cheap-HEAD path instead of one GetObjectAttributes per file.
+            if (fetch_part_offsets)
+                return S3::getObjectIdentity(c, uri.bucket, path, /*version_id=*/ {});
+            return S3::getObjectInfo(c, uri.bucket, path, /*version_id=*/ {}, /*with_metadata=*/ false, /*with_tags=*/ false);
+        }
         return S3::getObjectInfo(c, uri.bucket, path, /*version_id=*/ {}, /*with_metadata=*/ true, /*with_tags=*/ with_tags);
     };
 
