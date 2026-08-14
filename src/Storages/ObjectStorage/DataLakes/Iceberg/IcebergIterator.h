@@ -18,6 +18,7 @@
 #include <Common/ConcurrentBoundedQueue.h>
 #include <Common/ThreadPool_fwd.h>
 
+#include <atomic>
 #include <optional>
 #include <base/defines.h>
 
@@ -48,11 +49,11 @@ public:
 
     std::optional<DB::Iceberg::ProcessedManifestFileEntryPtr> next();
 
-    /// Advance to the next manifest file of the matching content type and return an iterator over
-    /// its entries (whose `next()` is safe to call from several threads at once), or nullptr when
-    /// no manifest files are left. Not thread-safe itself: the caller serializes the advance (it
-    /// mutates `manifest_file_index` and fetches the manifest file), then hands the returned
-    /// iterator to the parallel workers.
+    /// Grab the next manifest file of the matching content type and return an iterator over its
+    /// entries, or nullptr when no manifest files are left. Thread-safe: the cursor is an atomic, so
+    /// several parallel workers can call this concurrently and each gets a distinct manifest file,
+    /// fetching (the S3 read) and pruning it independently - the manifest reads themselves run in
+    /// parallel rather than being serialized behind a shared advance lock.
     Iceberg::ManifestIteratorPtr nextManifestFile();
 
 private:
@@ -64,7 +65,9 @@ private:
     PersistentTableComponents persistent_components;
     LoggerPtr log;
 
-    size_t manifest_file_index = 0;
+    /// Atomic so parallel workers (see IcebergIterator) can pull distinct manifest files without a
+    /// lock; the legacy single-threaded next() path uses it too (uncontended).
+    std::atomic<size_t> manifest_file_index{0};
     Iceberg::ManifestIteratorPtr current_manifest_file_iterator;
 
     const Iceberg::ManifestFileContentType manifest_file_content_type;
@@ -100,13 +103,10 @@ private:
     ConcurrentBoundedQueue<Iceberg::ProcessedManifestFileEntryPtr> blocking_queue;
     /// Legacy single-threaded producer (iceberg_metadata_processing_threads == 1).
     std::unique_ptr<ThreadFromGlobalPool> producer_task;
-    /// Parallel producers (iceberg_metadata_processing_threads > 1). They share the manifest-file
-    /// cursor of `data_files_iterator` through `manifest_advance_mutex` and drain each manifest
-    /// file's entries concurrently (ManifestFileIterator::next() is thread-safe).
+    /// Parallel producers (iceberg_metadata_processing_threads > 1). Each worker pulls a distinct
+    /// manifest file from `data_files_iterator` (thread-safe atomic cursor), reads and drains it
+    /// independently, then pulls the next - so the per-manifest S3 reads run in parallel.
     std::vector<ThreadFromGlobalPool> producer_threads;
-    std::mutex manifest_advance_mutex;
-    Iceberg::ManifestIteratorPtr current_producer_manifest TSA_GUARDED_BY(manifest_advance_mutex);
-    bool manifest_source_exhausted TSA_GUARDED_BY(manifest_advance_mutex) = false;
     /// Number of parallel producer threads still running; the last one to finish closes the queue.
     std::atomic<size_t> producers_remaining{0};
     IDataLakeMetadata::FileProgressCallback callback;

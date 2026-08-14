@@ -160,9 +160,14 @@ ManifestIteratorPtr SingleThreadIcebergKeysIterator::nextManifestFile()
         return nullptr;
 
     /// Find the next manifest file with matching content type and build an iterator over it.
-    while (manifest_file_index < data_snapshot->manifest_list_entries.size())
+    /// The cursor is atomic, so concurrent callers each claim a distinct index and the manifest
+    /// fetch below (an S3 read) runs in parallel instead of under a shared advance lock.
+    while (true)
     {
-        const auto & manifest_list_entry = data_snapshot->manifest_list_entries[manifest_file_index++];
+        const size_t index = manifest_file_index.fetch_add(1, std::memory_order_relaxed);
+        if (index >= data_snapshot->manifest_list_entries.size())
+            return nullptr;
+        const auto & manifest_list_entry = data_snapshot->manifest_list_entries[index];
         if (manifest_list_entry.content_type != manifest_file_content_type)
             continue;
 
@@ -185,8 +190,6 @@ ManifestIteratorPtr SingleThreadIcebergKeysIterator::nextManifestFile()
             filter_dag,
             table_snapshot->schema_id);
     }
-
-    return nullptr;
 }
 
 std::optional<ProcessedManifestFileEntryPtr> SingleThreadIcebergKeysIterator::next()
@@ -334,12 +337,13 @@ IcebergIterator::IcebergIterator(
         return;
     }
 
-    /// Parallel producers. Each worker repeatedly grabs the current manifest-file iterator (or, under
-    /// `manifest_advance_mutex`, advances to the next manifest file when the current one is drained)
-    /// and pulls entries from it: `ManifestFileIterator::next()` is thread-safe (atomic row cursor),
-    /// so several workers drain one manifest file concurrently. The heavy per-entry work
-    /// (deserialize bounds + evaluate min/max pruning) is what gets parallelized; only the cheap
-    /// per-file advance (`getManifestFile` + build, one entry among ~few dozen) is serialized.
+    /// Parallel producers. Each worker pulls a distinct manifest file from `data_files_iterator`
+    /// (thread-safe atomic cursor), then reads and fully drains it on its own. Because the manifest
+    /// fetch (an S3 read) is no longer held under a shared advance lock, up to
+    /// `num_producer_threads` manifest files are read from S3 concurrently - on a cold, cache-empty
+    /// scan of a many-manifest table that turns tens of serialized manifest reads into ceil(N/threads)
+    /// rounds. The heavy per-entry work (deserialize bounds + evaluate min/max pruning) runs in the
+    /// same loop.
     producers_remaining.store(num_producer_threads);
     producer_threads.reserve(num_producer_threads);
     for (size_t i = 0; i < num_producer_threads; ++i)
@@ -352,38 +356,30 @@ IcebergIterator::IcebergIterator(
                 {
                     while (!blocking_queue.isFinished())
                     {
-                        ManifestIteratorPtr mfi;
-                        {
-                            std::lock_guard lock(manifest_advance_mutex);
-                            if (!current_producer_manifest && !manifest_source_exhausted)
-                            {
-                                current_producer_manifest = data_files_iterator.nextManifestFile();
-                                if (!current_producer_manifest)
-                                    manifest_source_exhausted = true;
-                            }
-                            mfi = current_producer_manifest;
-                        }
-
+                        /// Claim and read the next manifest file (parallel across workers).
+                        ManifestIteratorPtr mfi = data_files_iterator.nextManifestFile();
                         if (!mfi)
                             break; /// No manifest files left to process.
 
-                        /// next() returns nullptr only when this manifest file is fully drained
-                        /// (skipped/deleted rows are consumed internally), never mid-file.
-                        auto entry = mfi->next();
-                        if (entry)
+                        /// Drain this manifest fully; this worker is its sole owner. next() returns
+                        /// nullptr only when the file is exhausted (skipped/deleted rows consumed
+                        /// internally), never mid-file.
+                        bool stop = false;
+                        while (auto entry = mfi->next())
                         {
                             while (!blocking_queue.push(std::move(entry)))
                             {
                                 if (blocking_queue.isFinished())
+                                {
+                                    stop = true;
                                     break;
+                                }
                             }
+                            if (stop)
+                                break;
                         }
-                        else
-                        {
-                            std::lock_guard lock(manifest_advance_mutex);
-                            if (current_producer_manifest == mfi)
-                                current_producer_manifest = nullptr;
-                        }
+                        if (stop)
+                            break;
                     }
                 }
                 catch (...)
