@@ -195,10 +195,8 @@ GlueCatalog::GlueCatalog(
     }
 
     boost::split(allowed_namespaces, settings.namespaces, boost::is_any_of(", "), boost::token_compress_on);
-
     credentials_provider = DB::S3::getCredentialsProvider(poco_config, credentials, creds_config);
     glue_client = std::make_unique<Aws::Glue::GlueClient>(credentials_provider, endpoint_provider, client_configuration);
-
 }
 
 GlueCatalog::~GlueCatalog() = default;
@@ -339,6 +337,7 @@ bool GlueCatalog::existsTable(const std::string & database_name, const std::stri
 bool GlueCatalog::tryGetTableMetadata(
     const std::string & database_name,
     const std::string & table_name,
+    DB::ContextPtr /* context_ */,
     TableMetadata & result) const
 {
     if (!isNamespaceAllowed(database_name))
@@ -439,7 +438,7 @@ bool GlueCatalog::tryGetTableMetadata(
                     column_type = getActualTimestampType(column.GetName(), result, column_type);
                 }
 
-                schema.push_back({column.GetName(), getType(column_type, can_be_nullable)});
+                schema.push_back({column.GetName(), getType(column_type, can_be_nullable, getContext())});
             }
             result.setSchema(schema);
         }
@@ -461,9 +460,10 @@ bool GlueCatalog::tryGetTableMetadata(
 void GlueCatalog::getTableMetadata(
     const std::string & database_name,
     const std::string & table_name,
+    DB::ContextPtr context_,
     TableMetadata & result) const
 {
-    if (!tryGetTableMetadata(database_name, table_name, result))
+    if (!tryGetTableMetadata(database_name, table_name, context_, result))
     {
         throw DB::Exception(
             DB::ErrorCodes::DATALAKE_DATABASE_ERROR,
@@ -593,8 +593,8 @@ GlueCatalog::ObjectStorageWithPath GlueCatalog::createObjectStorageForEarlyTable
 
     auto storage_settings = std::make_shared<DB::DataLakeStorageSettings>();
     storage_settings->loadFromSettingsChanges(settings.allChanged());
-    auto configuration = std::make_shared<DB::StorageS3IcebergConfiguration>(storage_settings);
-    DB::StorageObjectStorageConfiguration::initialize(*configuration, args, getContext(), false);
+    auto configuration = std::make_shared<DB::StorageS3IcebergConfiguration>(storage_settings, settings.namespaces);
+    configuration->initialize(args, getContext(), false);
 
     auto object_storage = configuration->createObjectStorage(getContext(), true, {});
 

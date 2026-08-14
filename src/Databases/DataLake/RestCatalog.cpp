@@ -225,6 +225,7 @@ RestCatalog::RestCatalog(
     const std::string & auth_scope_,
     const std::string & oauth_server_uri_,
     bool oauth_server_use_request_body_,
+    const std::string & namespaces_,
     DB::ContextPtr context_)
     : ICatalog(warehouse_)
     , DB::WithContext(context_)
@@ -233,7 +234,7 @@ RestCatalog::RestCatalog(
     , auth_scope(auth_scope_)
     , oauth_server_uri(oauth_server_uri_)
     , oauth_server_use_request_body(oauth_server_use_request_body_)
-    , allowed_namespaces("*")
+    , allowed_namespaces(namespaces_)
 {
 }
 
@@ -341,8 +342,9 @@ OneLakeCatalog::OneLakeCatalog(
     const std::string & auth_scope_,
     const std::string & oauth_server_uri_,
     bool oauth_server_use_request_body_,
+    const std::string & namespaces_,
     DB::ContextPtr context_)
-    : RestCatalog(warehouse_, base_url_, auth_scope_, oauth_server_uri_, oauth_server_use_request_body_, context_)
+    : RestCatalog(warehouse_, base_url_, auth_scope_, oauth_server_uri_, oauth_server_use_request_body_, namespaces_, context_)
     , tenant_id(onelake_tenant_id)
 {
     if (!bearer_token_.empty())
@@ -469,8 +471,9 @@ BigLakeCatalog::BigLakeCatalog(
     const std::string & google_adc_client_secret_,
     const std::string & google_adc_refresh_token_,
     const std::string & google_adc_quota_project_id_,
+    const std::string & namespaces_,
     DB::ContextPtr context_)
-    : RestCatalog(warehouse_, base_url_, "", "", false, context_)
+    : RestCatalog(warehouse_, base_url_, "", "", false, namespaces_, context_)
     , google_project_id(google_project_id_)
     , google_service_account(google_service_account_)
     , google_metadata_service(google_metadata_service_)
@@ -1093,17 +1096,18 @@ DB::Names RestCatalog::parseTables(DB::ReadBuffer & buf, const std::string & bas
 bool RestCatalog::existsTable(const std::string & namespace_name, const std::string & table_name) const
 {
     TableMetadata table_metadata;
-    return tryGetTableMetadata(namespace_name, table_name, table_metadata);
+    return tryGetTableMetadata(namespace_name, table_name, getContext(), table_metadata);
 }
 
 bool RestCatalog::tryGetTableMetadata(
     const std::string & namespace_name,
     const std::string & table_name,
+    DB::ContextPtr context_,
     TableMetadata & result) const
 {
     try
     {
-        return getTableMetadataImpl(namespace_name, table_name, result);
+        return getTableMetadataImpl(namespace_name, table_name, context_, result);
     }
     catch (const DB::Exception & ex)
     {
@@ -1117,15 +1121,17 @@ bool RestCatalog::tryGetTableMetadata(
 void RestCatalog::getTableMetadata(
     const std::string & namespace_name,
     const std::string & table_name,
+    DB::ContextPtr context_,
     TableMetadata & result) const
 {
-    if (!getTableMetadataImpl(namespace_name, table_name, result))
+    if (!getTableMetadataImpl(namespace_name, table_name, context_, result))
         throw DB::Exception(DB::ErrorCodes::DATALAKE_DATABASE_ERROR, "No response from iceberg catalog");
 }
 
 bool RestCatalog::getTableMetadataImpl(
     const std::string & namespace_name,
     const std::string & table_name,
+    DB::ContextPtr context_,
     TableMetadata & result) const
 {
     LOG_DEBUG(log, "Checking table {} in namespace {}", table_name, namespace_name);
@@ -1196,8 +1202,8 @@ bool RestCatalog::getTableMetadataImpl(
     {
         const bool allow_geo_parser
             = getContext()->getSettingsRef()[DB::Setting::allow_experimental_geo_types_in_iceberg].value;
-        auto schema_processor = DB::Iceberg::IcebergSchemaProcessor(allow_geo_parser);
-        auto id = DB::IcebergMetadata::parseTableSchema(metadata_object, schema_processor, log);
+        auto schema_processor = DB::Iceberg::IcebergSchemaProcessor(context_, allow_geo_parser);
+        auto id = DB::IcebergMetadata::parseTableSchema(metadata_object, schema_processor, context_, log);
         auto schema = schema_processor.getClickhouseTableSchemaById(id);
         result.setSchema(*schema);
     }

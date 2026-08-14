@@ -29,10 +29,8 @@ struct IcebergMetadataLogElement
     void appendToBlock(MutableColumns & columns) const;
 };
 
-/// `get_row` is evaluated lazily - only if `row_log_level` is actually enabled by the
-/// `iceberg_metadata_log_level` setting. Serializing the metadata row (e.g. a manifest entry) is
-/// expensive and, on wide tables with many manifest entries, was dominating query planning when
-/// done eagerly for every entry with logging off. Pass a closure that builds the string on demand.
+/// Here `get_row` function is used instead `row` string to calculate string only when required.
+/// Inside `insertRowToLogTable` code can exit immediately after `iceberg_metadata_log_level` setting check.
 void insertRowToLogTable(
     const ContextPtr & local_context,
     std::function<String()> get_row,

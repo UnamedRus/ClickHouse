@@ -58,11 +58,13 @@ public:
     void getTableMetadata(
         const std::string & namespace_name,
         const std::string & table_name,
+        DB::ContextPtr context_,
         TableMetadata & result) const override;
 
     bool tryGetTableMetadata(
         const std::string & namespace_name,
         const std::string & table_name,
+        DB::ContextPtr context_,
         TableMetadata & result) const override;
 
     std::optional<StorageType> getStorageType() const override;
@@ -99,6 +101,7 @@ protected:
         const std::string & auth_scope_,
         const std::string & oauth_server_uri_,
         bool oauth_server_use_request_body_,
+        const std::string & namespaces_,
         DB::ContextPtr context_);
 
     void createNamespaceIfNotExists(const String & namespace_name, const String & location) const;
@@ -140,7 +143,7 @@ public:
         AllowedNamespaces() {}
         explicit AllowedNamespaces(const std::string & namespaces_);
 
-        /// Check if nested namespaces (nesetd=true) or tables (nested=false) are allowed in namespace
+        /// Check if nested namespaces (nested=true) or tables (nested=false) are allowed in namespace
         bool isNamespaceAllowed(const std::string & namespace_, bool nested) const;
 
     private:
@@ -182,6 +185,7 @@ protected:
     bool getTableMetadataImpl(
         const std::string & namespace_name,
         const std::string & table_name,
+        DB::ContextPtr context_,
         TableMetadata & result) const;
 
     Config loadConfig();
@@ -220,6 +224,7 @@ public:
         const std::string & auth_scope_,
         const std::string & oauth_server_uri_,
         bool oauth_server_use_request_body_,
+        const std::string & namespaces_,
         DB::ContextPtr context_);
 
     DB::DatabaseDataLakeCatalogType getCatalogType() const override
@@ -251,6 +256,7 @@ public:
         const std::string & google_adc_client_secret_,
         const std::string & google_adc_refresh_token_,
         const std::string & google_adc_quota_project_id_,
+        const std::string & namespaces_,
         DB::ContextPtr context_);
 
     DB::DatabaseDataLakeCatalogType getCatalogType() const override

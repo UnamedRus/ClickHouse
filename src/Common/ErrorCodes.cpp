@@ -676,6 +676,9 @@
     M(1006, INVALID_CURSOR_LOOKUP) \
     M(1007, ILLEGAL_STREAM) \
     M(1008, TEMPORARY_DATA_NOT_IN_CACHE) \
+    M(1009, PENDING_MUTATIONS_NOT_ALLOWED) \
+    M(1010, EXPORT_PARTITION_ALREADY_EXPORTED) \
+    M(1011, PARTITION_EXPORT_FAILED) \
     /* See END */
 
 #ifdef APPLY_FOR_EXTERNAL_ERROR_CODES
@@ -692,7 +695,7 @@ namespace ErrorCodes
     APPLY_FOR_ERROR_CODES(M)
 #undef M
 
-    constexpr ErrorCode END = 1008;
+    constexpr ErrorCode END = 1011;
     ErrorPairHolder values[END + 1]{};
 
     struct ErrorCodesNames
