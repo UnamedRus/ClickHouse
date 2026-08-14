@@ -273,7 +273,7 @@ IcebergIterator::IcebergIterator(
           table_snapshot_,
           data_snapshot_,
           persistent_components_)
-    , blocking_queue(100)
+    , blocking_queue(16) /// bound is in batches now (see producer_batch_size): ~16*256 entries buffered
     , callback(std::move(callback_))
     , table_schema_id(table_snapshot_->schema_id)
 {
@@ -302,6 +302,17 @@ IcebergIterator::IcebergIterator(
             [this, thread_group = CurrentThread::getGroup()]()
             {
                 DB::ThreadGroupSwitcher switcher(thread_group, DB::ThreadName::ICEBERG_ITERATOR);
+                EntryBatch batch;
+                batch.reserve(producer_batch_size);
+                auto push_batch = [&]() -> bool
+                {
+                    while (!blocking_queue.push(std::move(batch)))
+                        if (blocking_queue.isFinished())
+                            return false;
+                    batch = EntryBatch();
+                    batch.reserve(producer_batch_size);
+                    return true;
+                };
                 while (!blocking_queue.isFinished())
                 {
                     std::optional<ProcessedManifestFileEntryPtr> entry;
@@ -321,14 +332,12 @@ IcebergIterator::IcebergIterator(
                     }
                     if (!entry.has_value())
                         break;
-                    while (!blocking_queue.push(std::move(entry.value())))
-                    {
-                        if (blocking_queue.isFinished())
-                        {
-                            break;
-                        }
-                    }
+                    batch.push_back(std::move(entry.value()));
+                    if (batch.size() >= producer_batch_size && !push_batch())
+                        break;
                 }
+                if (!batch.empty())
+                    push_batch();
                 blocking_queue.finish();
             });
         return;
@@ -348,6 +357,17 @@ IcebergIterator::IcebergIterator(
             [this, thread_group = CurrentThread::getGroup()]()
             {
                 DB::ThreadGroupSwitcher switcher(thread_group, DB::ThreadName::ICEBERG_ITERATOR);
+                EntryBatch batch;
+                batch.reserve(producer_batch_size);
+                auto push_batch = [&]() -> bool
+                {
+                    while (!blocking_queue.push(std::move(batch)))
+                        if (blocking_queue.isFinished())
+                            return false;
+                    batch = EntryBatch();
+                    batch.reserve(producer_batch_size);
+                    return true;
+                };
                 try
                 {
                     while (!blocking_queue.isFinished())
@@ -372,11 +392,9 @@ IcebergIterator::IcebergIterator(
                         auto entry = mfi->next();
                         if (entry)
                         {
-                            while (!blocking_queue.push(std::move(entry)))
-                            {
-                                if (blocking_queue.isFinished())
-                                    break;
-                            }
+                            batch.push_back(std::move(entry));
+                            if (batch.size() >= producer_batch_size && !push_batch())
+                                break;
                         }
                         else
                         {
@@ -394,6 +412,10 @@ IcebergIterator::IcebergIterator(
                     blocking_queue.finish();
                 }
 
+                /// Flush this worker's remaining entries before it exits, so nothing is lost.
+                if (!batch.empty())
+                    push_batch();
+
                 /// The last worker to finish closes the queue so the consumer's next() stops blocking.
                 if (producers_remaining.fetch_sub(1) == 1)
                     blocking_queue.finish();
@@ -405,7 +427,23 @@ ObjectInfoPtr IcebergIterator::next(size_t)
 {
     ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::IcebergMetadataReadWaitTimeMicroseconds);
     Iceberg::ProcessedManifestFileEntryPtr manifest_file_entry;
-    if (blocking_queue.pop(manifest_file_entry))
+    {
+        /// Serve from the local batch; only hit the shared queue once per batch to refill. The refill
+        /// loop tolerates an (unexpected) empty batch by popping again.
+        std::lock_guard consumer_lock(consumer_mutex);
+        while (consumer_batch_pos >= consumer_batch.size())
+        {
+            consumer_batch.clear();
+            consumer_batch_pos = 0;
+            EntryBatch next_batch;
+            if (!blocking_queue.pop(next_batch))
+                break; /// producers finished and the queue is drained
+            consumer_batch = std::move(next_batch);
+        }
+        if (consumer_batch_pos < consumer_batch.size())
+            manifest_file_entry = std::move(consumer_batch[consumer_batch_pos++]);
+    }
+    if (manifest_file_entry)
     {
         IcebergDataObjectInfoPtr object_info
             = std::make_shared<IcebergDataObjectInfo>(

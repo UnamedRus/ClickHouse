@@ -97,7 +97,21 @@ private:
     Iceberg::PersistentTableComponents persistent_components;
     Iceberg::SingleThreadIcebergKeysIterator data_files_iterator;
     Iceberg::SingleThreadIcebergKeysIterator deletes_iterator;
-    ConcurrentBoundedQueue<Iceberg::ProcessedManifestFileEntryPtr> blocking_queue;
+    /// Producer -> consumer hand-off in BATCHES of entries, not one entry at a time. The per-entry
+    /// pruning work is tiny (a min/max compare), so pushing/popping each of the (often tens of
+    /// thousands of) manifest entries individually turned the queue's mutex/condvar into the
+    /// dominant cost - many producer and consumer threads serialised on it. Batching amortises the
+    /// shared-queue lock by `producer_batch_size`, moving the per-entry path onto a cheap local
+    /// buffer. See producer loops and next().
+    static constexpr size_t producer_batch_size = 256;
+    using EntryBatch = std::vector<Iceberg::ProcessedManifestFileEntryPtr>;
+    ConcurrentBoundedQueue<EntryBatch> blocking_queue;
+    /// Consumer-side buffer: next() may be called concurrently by reader threads, so it serves
+    /// entries from a locally-held batch under `consumer_mutex` and only touches `blocking_queue`
+    /// once per batch (to refill), keeping the shared queue lock off the per-entry path.
+    std::mutex consumer_mutex;
+    EntryBatch consumer_batch TSA_GUARDED_BY(consumer_mutex);
+    size_t consumer_batch_pos TSA_GUARDED_BY(consumer_mutex) = 0;
     /// Legacy single-threaded producer (iceberg_metadata_processing_threads == 1).
     std::unique_ptr<ThreadFromGlobalPool> producer_task;
     /// Parallel producers (iceberg_metadata_processing_threads > 1). They share the manifest-file
