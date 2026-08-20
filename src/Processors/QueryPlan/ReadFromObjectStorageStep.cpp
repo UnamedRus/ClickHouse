@@ -18,11 +18,17 @@
 #include <Interpreters/Context.h>
 #include <Storages/prepareReadingFromFormat.h>
 #include <Storages/VirtualColumnUtils.h>
+#include <Parsers/IAST.h>
 #include <boost/algorithm/string/predicate.hpp>
 
 
 namespace DB
 {
+
+namespace ErrorCodes
+{
+    extern const int NOT_IMPLEMENTED;
+}
 
 namespace Setting
 {
@@ -190,6 +196,62 @@ bool ReadFromObjectStorageStep::requestReadingInOrder() const
 InputOrderInfoPtr ReadFromObjectStorageStep::getDataOrder() const
 {
     return convertSortingKeyToInputOrder(getStorageMetadata()->getSortingKey());
+}
+
+void ReadFromObjectStorageStep::setDistributedRead(size_t bucket_count)
+{
+    distributed_read_bucket_count = bucket_count;
+}
+
+Strings ReadFromObjectStorageStep::getShardsForDistributedRead() const
+{
+    /// TODO(distributed_plan): return the shard list the coordinator's task iterator distributes to.
+    return {};
+}
+
+void ReadFromObjectStorageStep::serialize(Serialization & ctx) const
+{
+    /// Serialize the object-storage source config faithfully by reusing the table-function args
+    /// (endpoint / credentials / format / schema / iceberg metadata pointer) that
+    /// object_storage_cluster already ships to workers. The worker reconstructs the reader from these.
+    writeStringBinary(configuration->getEngineName(), ctx.out);
+
+    auto args = configuration->createArgsWithAccessData();
+    writeStringBinary(args->formatWithSecretsOneLine(), ctx.out);
+
+    auto column_names = getOutputHeader()->getNames();
+    writeVarUInt(column_names.size(), ctx.out);
+    for (const auto & column : column_names)
+        writeStringBinary(column, ctx.out);
+
+    UInt8 flags = 0;
+    if (need_only_count)
+        flags |= 1;
+    if (filter_actions_dag)
+        flags |= 2;
+    writeIntBinary(flags, ctx.out);
+
+    writeVarUInt(max_block_size, ctx.out);
+    writeVarUInt(num_streams, ctx.out);
+    writeVarUInt(distributed_read_bucket_count, ctx.out);
+
+    if (filter_actions_dag)
+        filter_actions_dag->serialize(ctx.out, ctx.registry);
+}
+
+std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deserialization &)
+{
+    /// TODO(distributed_plan): reconstruct the StorageObjectStorage from the serialized table-function
+    /// args (parse the AST, build configuration + object_storage + snapshot + ReadFromFormatInfo),
+    /// then build the step with distributed_processing=true so the worker pulls its files from the
+    /// coordinator's task iterator via getClusterFunctionReadTaskCallback().
+    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "ReadFromObjectStorageStep::deserialize is not implemented yet");
+}
+
+void registerReadFromObjectStorageStep(QueryPlanStepRegistry & registry);
+void registerReadFromObjectStorageStep(QueryPlanStepRegistry & registry)
+{
+    registry.registerStep(ReadFromObjectStorageStep::STEP_NAME, ReadFromObjectStorageStep::deserialize);
 }
 
 }

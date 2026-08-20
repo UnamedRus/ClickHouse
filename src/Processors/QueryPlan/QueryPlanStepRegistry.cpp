@@ -63,6 +63,7 @@ void registerGatherReceiveStep(QueryPlanStepRegistry & registry);
 void registerBroadcastSendStep(QueryPlanStepRegistry & registry);
 void registerBroadcastReceiveStep(QueryPlanStepRegistry & registry);
 void registerReadFromMergeTreeStep(QueryPlanStepRegistry & registry);
+void registerReadFromObjectStorageStep(QueryPlanStepRegistry & registry);
 
 void registerReadFromTableStep(QueryPlanStepRegistry & registry);
 void registerReadFromTableFunctionStep(QueryPlanStepRegistry & registry);
@@ -104,6 +105,7 @@ void QueryPlanStepRegistry::registerPlanSteps()
     registerBroadcastSendStep(registry);
     registerBroadcastReceiveStep(registry);
     registerReadFromMergeTreeStep(registry);
+    registerReadFromObjectStorageStep(registry);
 
     registerReadFromTableStep(registry);
     registerReadFromTableFunctionStep(registry);
