@@ -170,7 +170,6 @@ namespace Setting
     extern const SettingsBool serialize_string_in_memory_with_zero_byte;
     extern const SettingsString temporary_files_codec;
     extern const SettingsNonZeroUInt64 temporary_files_buffer_size;
-    extern const SettingsBool use_hive_partitioning;
 }
 
 namespace ServerSetting
@@ -2460,8 +2459,15 @@ void Planner::buildPlanForQueryNode()
 
     if (query_processing_info.isSecondStage() || query_processing_info.isFromAggregationState())
     {
-        if (settings[Setting::use_hive_partitioning]
-            && !query_processing_info.isFirstStage()
+        /// Deliver the WHERE predicate to distributed object-storage reads (ReadFromCluster) for
+        /// object/file pruning: Iceberg min/max & partition pruning, Hive partition pruning, etc.
+        /// ObjectFilterStep is prune-only (its updatePipeline is a no-op), so it never filters rows
+        /// on the initiator -- required here because at WithMergeableState the filter columns may not
+        /// exist in the blocks returned by cluster replicas. This must NOT be gated on
+        /// use_hive_partitioning: otherwise a non-hive Iceberg cluster read gets a null filter and
+        /// min/max pruning is silently skipped (IcebergMinMaxIndexPrunedFiles=0 -> full-table
+        /// over-read on selective queries).
+        if (!query_processing_info.isFirstStage()
             && expression_analysis_result.hasWhere())
         {
             if (typeid_cast<ReadFromCluster *>(query_plan.getRootNode()->step.get()))
