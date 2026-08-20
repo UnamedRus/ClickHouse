@@ -21,8 +21,10 @@
 #include <Parsers/IAST.h>
 #include <Parsers/parseQuery.h>
 #include <Parsers/ExpressionElementParsers.h>
+#include <Parsers/ASTSelectQuery.h>
 #include <TableFunctions/TableFunctionFactory.h>
 #include <TableFunctions/ITableFunction.h>
+#include <Storages/StorageProxy.h>
 #include <boost/algorithm/string/predicate.hpp>
 
 
@@ -32,6 +34,39 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int NOT_IMPLEMENTED;
+    extern const int LOGICAL_ERROR;
+}
+
+/// Map a storage engine name to the equivalent table-function name (mirrors
+/// StorageObjectStorageCluster::updateQueryForDistributedEngineIfNeeded) so the worker can
+/// reconstruct the reader from the serialized args.
+static std::string objectStorageEngineToTableFunction(const StorageObjectStorageConfigurationPtr & configuration)
+{
+    auto engine = configuration->getEngineName();
+    if (engine == "Iceberg")
+    {
+        switch (configuration->getType())
+        {
+            case ObjectStorageType::S3: engine = "IcebergS3"; break;
+            case ObjectStorageType::Azure: engine = "IcebergAzure"; break;
+            case ObjectStorageType::HDFS: engine = "IcebergHDFS"; break;
+            default:
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Can't find table function for engine {}", engine);
+        }
+    }
+
+    static const std::unordered_map<std::string, std::string> engine_to_function = {
+        {"S3", "s3"}, {"Azure", "azureBlobStorage"}, {"HDFS", "hdfs"},
+        {"Iceberg", "iceberg"}, {"IcebergS3", "icebergS3"}, {"IcebergAzure", "icebergAzure"},
+        {"IcebergHDFS", "icebergHDFS"}, {"IcebergLocal", "icebergLocal"},
+        {"DeltaLake", "deltaLake"}, {"DeltaLakeS3", "deltaLakeS3"}, {"DeltaLakeAzure", "deltaLakeAzure"},
+        {"DeltaLakeLocal", "deltaLakeLocal"}, {"Hudi", "hudi"},
+        {"COSN", "cosn"}, {"GCS", "gcs"}, {"OSS", "oss"},
+    };
+    auto it = engine_to_function.find(engine);
+    if (it == engine_to_function.end())
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Can't find table function for engine {}", engine);
+    return it->second;
 }
 
 namespace Setting
@@ -218,7 +253,7 @@ void ReadFromObjectStorageStep::serialize(Serialization & ctx) const
     /// Serialize the object-storage source config faithfully by reusing the table-function args
     /// (endpoint / credentials / format / schema / iceberg metadata pointer) that
     /// object_storage_cluster already ships to workers. The worker reconstructs the reader from these.
-    writeStringBinary(configuration->getEngineName(), ctx.out);
+    writeStringBinary(objectStorageEngineToTableFunction(configuration), ctx.out);
 
     auto args = configuration->createArgsWithAccessData();
     writeStringBinary(args->formatWithSecretsOneLine(), ctx.out);
@@ -289,10 +324,16 @@ std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deseriali
     auto columns_desc = table_function->getActualTableStructureWithAccess(ctx.context, /*is_insert_query=*/ false);
     StoragePtr storage = table_function->execute(func_ast, ctx.context, table_function->getName(), std::move(columns_desc));
 
-    auto * object_storage_table = dynamic_cast<StorageObjectStorage *>(storage.get());
+    /// Table functions return the real storage wrapped in a lazy StorageTableFunctionProxy; unwrap it.
+    StoragePtr nested = storage;
+    if (auto * proxy = dynamic_cast<StorageProxy *>(storage.get()))
+        nested = proxy->getNested();
+
+    auto * object_storage_table = dynamic_cast<StorageObjectStorage *>(nested.get());
     if (!object_storage_table)
         throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "Deserialized storage for step {} is not a StorageObjectStorage", STEP_NAME);
+            "Deserialized storage for step {} is not a StorageObjectStorage, got '{}'",
+            STEP_NAME, storage ? storage->getName() : "null");
 
     auto object_storage = object_storage_table->getObjectStorage();
     auto configuration = object_storage_table->getObjectStorageConfiguration();
@@ -300,6 +341,10 @@ std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deseriali
     auto storage_snapshot = object_storage_table->getStorageSnapshot(metadata, ctx.context);
 
     SelectQueryInfo query_info;
+    /// Provide a minimal SELECT AST so plan optimizations on the worker (e.g. prewhere's
+    /// SelectQueryInfo::isFinal) don't dereference a null query pointer. The predicate itself
+    /// is carried by filter_actions_dag, not by this AST.
+    query_info.query = make_intrusive<ASTSelectQuery>();
     auto virtual_columns = metadata->virtuals.getSampleBlock(
         VirtualsKind::All, VirtualsMaterializationPlace::Reader).getNamesAndTypesList();
 
@@ -317,7 +362,7 @@ std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deseriali
         query_info,
         storage_snapshot,
         std::nullopt,
-        /*distributed_processing=*/ true,
+        /*distributed_processing=*/ false,
         std::move(read_from_format_info),
         step_need_only_count,
         ctx.context,
