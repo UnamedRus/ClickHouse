@@ -64,6 +64,7 @@
 #include <AggregateFunctions/registerAggregateFunctions.h>
 #include <TableFunctions/registerTableFunctions.h>
 #include <Storages/registerStorages.h>
+#include <Processors/QueryPlan/QueryPlanStepRegistry.h>
 #include <Dictionaries/registerDictionaries.h>
 #include <Disks/registerDisks.h>
 #include <Formats/registerFormats.h>
@@ -1158,6 +1159,7 @@ try
     registerDictionaries();
     registerDisks(/* global_skip_access_check= */ true);
     registerFormats();
+    QueryPlanStepRegistry::registerPlanSteps();
 
     processConfig();
 
