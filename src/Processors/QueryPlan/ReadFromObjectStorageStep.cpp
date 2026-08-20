@@ -19,6 +19,10 @@
 #include <Storages/prepareReadingFromFormat.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <Parsers/IAST.h>
+#include <Parsers/parseQuery.h>
+#include <Parsers/ExpressionElementParsers.h>
+#include <TableFunctions/TableFunctionFactory.h>
+#include <TableFunctions/ITableFunction.h>
 #include <boost/algorithm/string/predicate.hpp>
 
 
@@ -239,13 +243,94 @@ void ReadFromObjectStorageStep::serialize(Serialization & ctx) const
         filter_actions_dag->serialize(ctx.out, ctx.registry);
 }
 
-std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deserialization &)
+std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deserialization & ctx)
 {
-    /// TODO(distributed_plan): reconstruct the StorageObjectStorage from the serialized table-function
-    /// args (parse the AST, build configuration + object_storage + snapshot + ReadFromFormatInfo),
-    /// then build the step with distributed_processing=true so the worker pulls its files from the
-    /// coordinator's task iterator via getClusterFunctionReadTaskCallback().
-    throw Exception(ErrorCodes::NOT_IMPLEMENTED, "ReadFromObjectStorageStep::deserialize is not implemented yet");
+    String engine_name;
+    readStringBinary(engine_name, ctx.in);
+    String args_str;
+    readStringBinary(args_str, ctx.in);
+
+    Names column_names;
+    size_t num_columns = 0;
+    readVarUInt(num_columns, ctx.in);
+    column_names.reserve(num_columns);
+    for (size_t i = 0; i < num_columns; ++i)
+    {
+        String column;
+        readStringBinary(column, ctx.in);
+        column_names.push_back(std::move(column));
+    }
+
+    UInt8 flags = 0;
+    readIntBinary(flags, ctx.in);
+    const bool step_need_only_count = flags & 1;
+    const bool has_filter = flags & 2;
+
+    size_t step_max_block_size = 0;
+    size_t step_num_streams = 0;
+    size_t bucket_count = 0;
+    readVarUInt(step_max_block_size, ctx.in);
+    readVarUInt(step_num_streams, ctx.in);
+    readVarUInt(bucket_count, ctx.in);
+
+    std::optional<ActionsDAG> filter_dag;
+    if (has_filter)
+        filter_dag = ActionsDAG::deserialize(ctx.in, ctx.registry, ctx.context);
+
+    /// Reconstruct the StorageObjectStorage from the serialized table-function form
+    /// (engine + createArgsWithAccessData args) — the same faithful config object_storage_cluster
+    /// ships to workers.
+    const String func_sql = engine_name + "(" + args_str + ")";
+    ParserFunction parser(/*allow_function_parameters_=*/ false);
+    ASTPtr func_ast = parseQuery(parser, func_sql.data(), func_sql.data() + func_sql.size(),
+        "object storage table function", /*max_query_size=*/ 0, /*max_parser_depth=*/ 0, /*max_parser_backtracks=*/ 0);
+
+    auto table_function = TableFunctionFactory::instance().get(func_ast, ctx.context);
+    auto columns_desc = table_function->getActualTableStructureWithAccess(ctx.context, /*is_insert_query=*/ false);
+    StoragePtr storage = table_function->execute(func_ast, ctx.context, table_function->getName(), std::move(columns_desc));
+
+    auto * object_storage_table = dynamic_cast<StorageObjectStorage *>(storage.get());
+    if (!object_storage_table)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Deserialized storage for step {} is not a StorageObjectStorage", STEP_NAME);
+
+    auto object_storage = object_storage_table->getObjectStorage();
+    auto configuration = object_storage_table->getObjectStorageConfiguration();
+    auto metadata = object_storage_table->getInMemoryMetadataPtr(ctx.context, /*bypass_metadata_cache=*/ false);
+    auto storage_snapshot = object_storage_table->getStorageSnapshot(metadata, ctx.context);
+
+    SelectQueryInfo query_info;
+    auto virtual_columns = metadata->virtuals.getSampleBlock(
+        VirtualsKind::All, VirtualsMaterializationPlace::Reader).getNamesAndTypesList();
+
+    auto read_from_format_info = configuration->prepareReadingFromFormat(
+        object_storage, column_names, storage_snapshot,
+        object_storage_table->supportsSubsetOfColumns(ctx.context),
+        /*supports_tuple_elements=*/ true, ctx.context, PrepareReadingFromFormatHiveParams{});
+
+    auto step = std::make_unique<ReadFromObjectStorageStep>(
+        object_storage_table->getStorageID(),
+        object_storage,
+        configuration,
+        column_names,
+        virtual_columns,
+        query_info,
+        storage_snapshot,
+        std::nullopt,
+        /*distributed_processing=*/ true,
+        std::move(read_from_format_info),
+        step_need_only_count,
+        ctx.context,
+        step_max_block_size,
+        step_num_streams);
+
+    if (filter_dag)
+        step->applyFilters(ActionDAGNodes{.nodes = filter_dag->getOutputs()});
+    if (bucket_count)
+        step->setDistributedRead(bucket_count);
+
+    ctx.storage_holders.push_back(storage);
+    return step;
 }
 
 void registerReadFromObjectStorageStep(QueryPlanStepRegistry & registry);
