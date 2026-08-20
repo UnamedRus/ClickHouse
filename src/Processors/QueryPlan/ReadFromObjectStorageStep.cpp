@@ -25,6 +25,9 @@
 #include <TableFunctions/TableFunctionFactory.h>
 #include <TableFunctions/ITableFunction.h>
 #include <Storages/StorageProxy.h>
+#include <Processors/QueryPlan/BuildQueryPipelineSettings.h>
+#include <Processors/QueryPlan/IParameterLookup.h>
+#include <Common/SipHash.h>
 #include <boost/algorithm/string/predicate.hpp>
 
 
@@ -72,6 +75,53 @@ static std::string objectStorageEngineToTableFunction(const StorageObjectStorage
 namespace Setting
 {
     extern const SettingsBool parallelize_output_from_storages;
+}
+
+/// Wraps a file iterator so that a distributed_plan worker reads only the files that belong to its
+/// bucket. Bucket membership is a pure function of the file path (`sipHash64(path) % total_buckets`),
+/// which makes the partition deterministic across workers regardless of listing order or thread
+/// scheduling: every file lands in exactly one bucket, so the union over all workers is the full,
+/// non-overlapping file set. Thread-safe: the wrapper is stateless apart from the underlying
+/// iterator, which is already safe to pull concurrently.
+namespace
+{
+class BucketFilterObjectIterator : public IObjectIterator
+{
+public:
+    BucketFilterObjectIterator(ObjectIterator iterator_, size_t bucket_id_, size_t total_buckets_)
+        : iterator(std::move(iterator_)), bucket_id(bucket_id_), total_buckets(total_buckets_)
+    {
+    }
+
+    ObjectInfoPtr next(size_t thread) override
+    {
+        while (auto object_info = iterator->next(thread))
+        {
+            if (sipHash64(object_info->getPath()) % total_buckets == bucket_id)
+                return object_info;
+        }
+        return nullptr;
+    }
+
+    size_t estimatedKeysCount() override
+    {
+        const size_t total = iterator->estimatedKeysCount();
+        return (total + total_buckets - 1) / total_buckets;
+    }
+
+    std::optional<UInt64> getSnapshotVersion() const override { return iterator->getSnapshotVersion(); }
+
+    void setEmitProfileEvents(bool value) override
+    {
+        emit_profile_events = value;
+        iterator->setEmitProfileEvents(value);
+    }
+
+private:
+    const ObjectIterator iterator;
+    const size_t bucket_id;
+    const size_t total_buckets;
+};
 }
 
 
@@ -138,9 +188,20 @@ void ReadFromObjectStorageStep::updatePrewhereInfo(const PrewhereInfoPtr & prewh
     output_header = std::make_shared<const Block>(info.source_header);
 }
 
-void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings &)
+void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeline, const BuildQueryPipelineSettings & build_settings)
 {
     createIterator();
+
+    /// When this step is part of a distributed query plan, each worker task is given a 'bucket_id'
+    /// and 'total_buckets' parameter; keep only the files that hash to this bucket so the workers
+    /// together read every file exactly once. See BucketFilterObjectIterator.
+    if (distributed_read_bucket_count > 0 && build_settings.parameter_lookup)
+    {
+        const size_t bucket_id = parse<UInt64>(build_settings.parameter_lookup->getParameter("bucket_id").safeGet<String>());
+        const size_t num_buckets = build_settings.parameter_lookup->getParameter("total_buckets").safeGet<UInt64>();
+        if (num_buckets > 1)
+            iterator_wrapper = std::make_shared<BucketFilterObjectIterator>(iterator_wrapper, bucket_id, num_buckets);
+    }
 
     Pipes pipes;
     auto context = getContext();
