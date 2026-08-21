@@ -56,6 +56,7 @@ void registerFilterStep(QueryPlanStepRegistry & registry);
 void registerTotalsHavingStep(QueryPlanStepRegistry & registry);
 void registerExtremesStep(QueryPlanStepRegistry & registry);
 void registerJoinStep(QueryPlanStepRegistry & registry);
+void registerWindowStep(QueryPlanStepRegistry & registry);
 void registerShuffleSendStep(QueryPlanStepRegistry & registry);
 void registerShuffleReceiveStep(QueryPlanStepRegistry & registry);
 void registerGatherSendStep(QueryPlanStepRegistry & registry);
@@ -97,6 +98,7 @@ void QueryPlanStepRegistry::registerPlanSteps()
     registerTotalsHavingStep(registry);
     registerExtremesStep(registry);
     registerJoinStep(registry);
+    registerWindowStep(registry);
 
     registerShuffleSendStep(registry);
     registerShuffleReceiveStep(registry);

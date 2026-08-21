@@ -57,6 +57,10 @@ static constexpr auto DBMS_MERGE_TREE_PART_INFO_VERSION = 1;
 
 static constexpr auto DBMS_QUERY_PLAN_SERIALIZATION_VERSION = 1;
 /// Version 1 added the initiator's settings changes to the task.
+/// First query-plan serialization version that registers a "Window" step. Gates serializing a
+/// `WindowStep` for `make_distributed_plan`. Set to the current version in this build (all antalya
+/// nodes run the same version, so the cross-version guard is a no-op here but kept for structure).
+static constexpr auto DBMS_MIN_QUERY_PLAN_SERIALIZATION_VERSION_WITH_WINDOW_STEP = 1;
 /// Version 2 added per-stream streaming-exchange ports to exchange_stream_sources.
 static constexpr auto DBMS_DISTRIBUTED_TASK_SERIALIZATION_VERSION = 2;
 
