@@ -23,7 +23,6 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int INCORRECT_DATA;
-    extern const int SUPPORT_IS_DISABLED;
 }
 
 static ITransformingStep::Traits getTraits(bool preserves_sorting)
@@ -318,14 +317,6 @@ deserializeWindowFunctions(ReadBuffer & in, const Block & input_header)
 
 void WindowStep::serialize(Serialization & ctx) const
 {
-    /// `WindowStep` is only registered under `QueryPlanStepRegistry` since query-plan serialization
-    /// version 4 upstream; gate here so a peer that does not know the "Window" step name never receives
-    /// bytes it cannot parse. All antalya nodes run the same version, so this is a no-op in practice.
-    if (ctx.version < DBMS_MIN_QUERY_PLAN_SERIALIZATION_VERSION_WITH_WINDOW_STEP)
-        throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
-            "make_distributed_plan: serializing a WindowStep requires query plan serialization "
-            "version >= {}; all nodes must run the same version", DBMS_MIN_QUERY_PLAN_SERIALIZATION_VERSION_WITH_WINDOW_STEP);
-
     UInt8 flags = 0;
     if (streams_fan_out)
         flags |= 1;
@@ -343,13 +334,6 @@ void WindowStep::serialize(Serialization & ctx) const
 
 QueryPlanStepPtr WindowStep::deserialize(Deserialization & ctx)
 {
-    /// Mirrors the guard in `serialize`: a "Window" step never legitimately arrives from a stream
-    /// written below this version, since a peer that old cannot have written one (see `serialize`).
-    if (ctx.version < DBMS_MIN_QUERY_PLAN_SERIALIZATION_VERSION_WITH_WINDOW_STEP)
-        throw Exception(ErrorCodes::SUPPORT_IS_DISABLED,
-            "make_distributed_plan: deserializing a WindowStep requires query plan serialization "
-            "version >= {}; all nodes must run the same version", DBMS_MIN_QUERY_PLAN_SERIALIZATION_VERSION_WITH_WINDOW_STEP);
-
     if (ctx.input_headers.size() != 1)
         throw Exception(ErrorCodes::INCORRECT_DATA, "WindowStep must have one input stream");
 
