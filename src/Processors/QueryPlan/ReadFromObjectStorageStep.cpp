@@ -324,11 +324,15 @@ void ReadFromObjectStorageStep::serialize(Serialization & ctx) const
     for (const auto & column : column_names)
         writeStringBinary(column, ctx.out);
 
+    auto prewhere_info = getPrewhereInfo();
+
     UInt8 flags = 0;
     if (need_only_count)
         flags |= 1;
     if (filter_actions_dag)
         flags |= 2;
+    if (prewhere_info)
+        flags |= 4;
     writeIntBinary(flags, ctx.out);
 
     writeVarUInt(max_block_size, ctx.out);
@@ -337,6 +341,11 @@ void ReadFromObjectStorageStep::serialize(Serialization & ctx) const
 
     if (filter_actions_dag)
         filter_actions_dag->serialize(ctx.out, ctx.registry);
+
+    /// The optimizer can move the predicate into PREWHERE on the storage step (e.g. for Iceberg),
+    /// in which case it lives here rather than in filter_actions_dag; ship it so the worker filters.
+    if (prewhere_info)
+        prewhere_info->serialize(ctx);
 }
 
 std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deserialization & ctx)
@@ -361,6 +370,7 @@ std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deseriali
     readIntBinary(flags, ctx.in);
     const bool step_need_only_count = flags & 1;
     const bool has_filter = flags & 2;
+    const bool has_prewhere = flags & 4;
 
     size_t step_max_block_size = 0;
     size_t step_num_streams = 0;
@@ -372,6 +382,10 @@ std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deseriali
     std::optional<ActionsDAG> filter_dag;
     if (has_filter)
         filter_dag = ActionsDAG::deserialize(ctx.in, ctx.registry, ctx.context);
+
+    PrewhereInfoPtr prewhere_info;
+    if (has_prewhere)
+        prewhere_info = std::make_shared<PrewhereInfo>(PrewhereInfo::deserialize(ctx));
 
     /// Reconstruct the StorageObjectStorage from the serialized table-function form
     /// (engine + createArgsWithAccessData args) — the same faithful config object_storage_cluster
@@ -432,6 +446,10 @@ std::unique_ptr<IQueryPlanStep> ReadFromObjectStorageStep::deserialize(Deseriali
 
     if (filter_dag)
         step->applyFilters(ActionDAGNodes{.nodes = filter_dag->getOutputs()});
+    /// Re-attach PREWHERE via updatePrewhereInfo so updateFormatPrewhereInfo pulls the prewhere
+    /// input columns back into the read set (the serialized output columns exclude them).
+    if (prewhere_info)
+        step->updatePrewhereInfo(prewhere_info);
     if (bucket_count)
         step->setDistributedRead(bucket_count);
 
