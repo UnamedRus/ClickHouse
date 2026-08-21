@@ -365,7 +365,7 @@ ParsedManifestFileEntryPtr AvroForIcebergDeserializer::createParsedManifestFileE
                 /*sort_order_id = */ std::nullopt,
                 record_count,
                 file_size_in_bytes,
-                /*split_offsets = */ {},
+                /*split_offsets = */ std::vector<Int64>{},
                 content_offset,
                 content_size_in_bytes);
         }
