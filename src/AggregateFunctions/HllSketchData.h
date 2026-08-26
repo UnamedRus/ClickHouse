@@ -6,6 +6,7 @@
 
 #include <boost/noncopyable.hpp>
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <hll.hpp>
 
@@ -100,10 +101,12 @@ public:
 
     UInt64 size(datasketches::target_hll_type tgt_type) const
     {
+        /// `get_estimate` returns a `double`. Truncating it would bias every result downwards by up
+        /// to one, turning an estimate of `999.9999` for an exactly-known cardinality into `999`.
         if (sk_union)
-            return static_cast<UInt64>(sk_union->get_result(tgt_type).get_estimate());
+            return static_cast<UInt64>(std::llround(sk_union->get_result(tgt_type).get_estimate()));
         if (sk_update)
-            return static_cast<UInt64>(sk_update->get_estimate());
+            return static_cast<UInt64>(std::llround(sk_update->get_estimate()));
         return 0;
     }
 

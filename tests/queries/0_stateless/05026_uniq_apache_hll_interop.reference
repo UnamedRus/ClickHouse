@@ -1,0 +1,17 @@
+import sketches built outside ClickHouse
+5
+5
+8
+8
+3
+84
+5
+0
+export sketches for consumption outside ClickHouse
+1
+1
+1
+states survive a write/read cycle through storage
+20
+1
+malformed states are rejected
