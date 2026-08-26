@@ -14,5 +14,6 @@ argument types
 state/merge roundtrip is native
 1
 1
+1
 AggregateFunction(uniqApacheHLL(14, 'HLL_8'), UInt64)
 parameter validation

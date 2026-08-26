@@ -21,9 +21,13 @@ SELECT abs(toInt64(uniqApacheHLL(toString(number))) - 500) < 20 FROM numbers(500
 SELECT abs(toInt64(uniqApacheHLL(toDate('2020-01-01') + number)) - 500) < 20 FROM numbers(500);
 
 SELECT 'state/merge roundtrip is native';
--- Merging per-group -State values must equal a direct aggregate over the whole set.
+-- Merging per-group `-State` values covers exactly the same set as a direct aggregate, so the two
+-- estimates agree to within the error of the sketch. They are not required to be equal: DataSketches
+-- reports the HIP estimate for a sketch that has only been updated and the composite estimate for
+-- one that came out of a union, so a merged result is not the same number as a directly built one
+-- even though both are computed from identical registers.
 SELECT
-    uniqApacheHLLMerge(s) = (SELECT uniqApacheHLL(number) FROM numbers(100000))
+    abs(toInt64(uniqApacheHLLMerge(s)) - toInt64((SELECT uniqApacheHLL(number) FROM numbers(100000)))) < 3000
 FROM
 (
     SELECT uniqApacheHLLState(number) AS s
@@ -31,9 +35,16 @@ FROM
     GROUP BY number % 17
 );
 
--- The state serialization survives a full finalize/re-read cycle unchanged.
+-- Merging is independent of how the input was partitioned: the registers of the union do not depend
+-- on the grouping, and both sides come out of a union, so two different partitionings of the same
+-- set agree exactly.
 SELECT
-    uniqApacheHLLMerge(s) = (SELECT uniqApacheHLL(number) FROM numbers(1000))
+    (SELECT uniqApacheHLLMerge(s) FROM (SELECT uniqApacheHLLState(number) AS s FROM numbers(100000) GROUP BY number % 17))
+  = (SELECT uniqApacheHLLMerge(s) FROM (SELECT uniqApacheHLLState(number) AS s FROM numbers(100000) GROUP BY number % 13));
+
+-- The same holds for a single state.
+SELECT
+    abs(toInt64(uniqApacheHLLMerge(s)) - toInt64((SELECT uniqApacheHLL(number) FROM numbers(1000)))) < 30
 FROM
 (
     SELECT uniqApacheHLLState(number) AS s FROM numbers(1000)
