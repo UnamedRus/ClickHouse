@@ -48,6 +48,8 @@ namespace ErrorCodes
   *   - `void serialize(const Data &, WriteBuffer &) const;`
   *   - `void deserialize(Data &, ReadBuffer &) const;`
   *   - `void insertResultInto(const Data &, IColumn & to) const;`
+  *   - `static constexpr bool states_compatible_across_parameters;`  whether states built with
+  *     different parameters share one binary representation
   *
   * This works for cardinality sketches (HLL, CPC, Theta) whose result is a `UInt64` estimate, and
   * equally for quantile sketches whose result type and extraction differ - only the policy changes.
@@ -71,6 +73,23 @@ public:
     String getName() const override { return Policy::getName(); }
 
     bool allocatesMemoryInArena() const override { return false; }
+
+    /// A policy may declare that its parameters configure the sketch without changing the layout of
+    /// `Data` - they are held by the policy, which lives in the aggregate function rather than in the
+    /// state - and that a serialized sketch records its own configuration. States of two
+    /// parameterizations are then interchangeable, so `-Merge` can read one under the other and
+    /// `CAST` can relabel a column between the two types without touching its data.
+    ///
+    /// Interchangeable is not the same as equivalent. For `uniqApacheHLL` a union takes the
+    /// resolution of its coarsest input, so merging states of different `lg_k` is lossy, and
+    /// relabelling alone rescales nothing: it leaves the sketch as it was.
+    bool haveSameStateRepresentationImpl(const IAggregateFunction & rhs) const override
+    {
+        if constexpr (Policy::states_compatible_across_parameters)
+            return getName() == rhs.getName() && this->haveEqualArgumentTypes(rhs);
+        else
+            return IAggregateFunction::haveSameStateRepresentationImpl(rhs);
+    }
 
     void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
     {

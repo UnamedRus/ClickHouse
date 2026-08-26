@@ -203,6 +203,11 @@ struct HllSketchPolicy
 {
     using Data = HllSketchData;
 
+    /// `lg_k` and the target type are held here rather than in `HllSketchData`, whose layout is two
+    /// pointers whatever they are, and a serialized sketch records its own `lg_k`. So a state built
+    /// with one parameterization can be used by a function declared with another.
+    static constexpr bool states_compatible_across_parameters = true;
+
     uint8_t lg_config_k = 12;
     datasketches::target_hll_type target_type = datasketches::HLL_4;
 
