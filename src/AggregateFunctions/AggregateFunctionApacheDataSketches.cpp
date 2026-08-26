@@ -20,6 +20,10 @@ Calculates the approximate number of different argument values using an [Apache 
 The serialized state produced by the `-State` combinator is byte-compatible with the Apache DataSketches HLL format, so sketches can be exchanged with external services (Java, Python, C++) using the standard `-State`/`-Merge` combinators. For example, a sketch built by an upstream service can be merged with `uniqApacheHLLMerge`, and a sketch built in ClickHouse can be exported with `uniqApacheHLLState`.
 
 Integers are hashed as their 8-byte representation (matching DataSketches `update(long)`), floating-point values as an IEEE-754 double, and strings as their raw bytes.
+
+An estimate obtained by merging sketches is not the same number as one computed in a single pass over the same values, even though both are derived from identical registers: DataSketches reports the HIP estimator for a sketch that has only been updated and the composite estimator for one produced by a union. The result therefore depends on how the aggregation was partitioned across threads, parts and shards, and is slightly less accurate once any merge has taken place.
+
+The resolution of a merged sketch is the smallest `lg_k` among its inputs, not the `lg_k` named by the type. Merging a sketch that was built with a lower `lg_k` - for example one produced by another service - permanently lowers the resolution of both the estimate and the state written back.
     )";
     FunctionDocumentation::Syntax syntax = "uniqApacheHLL([lg_k, [type]])(x)";
     FunctionDocumentation::Arguments arguments = {
