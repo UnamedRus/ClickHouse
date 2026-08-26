@@ -64,8 +64,19 @@ private:
         if (!sk_union)
         {
             /// `hll_union` requires `lg_max_k` in [7, 21], while a sketch may use `lg_config_k` in
-            /// [4, 21]. Using `max(lg_config_k, 7)` is safe: the union downsamples its result to the
-            /// smallest `lg_config_k` it has actually seen, so the effective resolution is unchanged.
+            /// [4, 21], so the union is built with `max(lg_config_k, 7)`. Raising the floor does not
+            /// inflate the result: `get_result` downsamples to the smallest `lg_config_k` the union
+            /// has actually seen, so a sketch built with `lg_config_k = 4` still yields a result at 4.
+            ///
+            /// That same rule means the resolution of a merged state is the minimum over its inputs
+            /// rather than the `lg_config_k` named by the aggregate function's type. This matters for
+            /// a sketch produced elsewhere and deserialized here: nothing checks its `lg_config_k`
+            /// against ours, so merging a coarser one permanently lowers the resolution of both the
+            /// estimate and the state written back, which still carries this function's type.
+            ///
+            /// With no input at all the union has no minimum to downsample to and reports its own
+            /// `lg_max_k`, so a state that was only ever merged from empty states serializes as
+            /// `lg_config_k = 7` even when the type says less.
             sk_union = std::make_unique<datasketches::hll_union>(std::max<uint8_t>(lg_config_k, 7));
         }
         return sk_union.get();
