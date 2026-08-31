@@ -77,6 +77,12 @@ AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
             return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv4::FieldType>>(lg_config_k, target_type, argument_types, params);
         if (which.isIPv6())
             return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv6::FieldType>>(lg_config_k, target_type, argument_types, params);
+        {
+            AggregateFunctionPtr decimal_res(createWithDecimalType<AggregateFunctionUniqApacheHLL>(
+                argument_type, lg_config_k, target_type, argument_types, params));
+            if (decimal_res)
+                return decimal_res;
+        }
         if (which.isTuple())
         {
             if (use_exact_hash_function)
@@ -101,7 +107,9 @@ The serialized state produced by the `-State` combinator carries the sketch in t
 
 Integers are hashed as their 8-byte representation (matching DataSketches `update(long)`), floating-point values as an IEEE-754 double, strings as their raw bytes, `UUID`s as their canonical 16 bytes and `IPv6` addresses in network order. Sketches over those types can be reproduced by a producer outside ClickHouse that hashes the same bytes.
 
-Sketches over any other type cannot. The 128 and 256 bit integers are hashed in ClickHouse's own byte order, for which no convention is shared between implementations. Every remaining type - a decimal, `DateTime64`, an array - and every call with more than one argument is first hashed to a single value by ClickHouse, exactly as `uniq` does, and only that hash reaches the sketch.
+Decimals and `DateTime64` are hashed as the integer they hold - the unscaled value of the decimal, and for `DateTime64(3)` the epoch milliseconds a caller elsewhere would pass to `update(long)`. The scale belongs to the column type rather than to the value, so both sides have to agree on it.
+
+Sketches over the remaining types cannot be reproduced outside ClickHouse. The 128 and 256 bit integers, and decimals that wide, are hashed in ClickHouse's own byte order, for which no convention is shared between implementations. Every other type - an array, a tuple - and every call with more than one argument is first hashed to a single value by ClickHouse, exactly as `uniq` does, and only that hash reaches the sketch.
 
 An estimate obtained by merging sketches is not the same number as one computed in a single pass over the same values, even though both are derived from identical registers: DataSketches reports the HIP estimator for a sketch that has only been updated and the composite estimator for one produced by a union. The result therefore depends on how the aggregation was partitioned across threads, parts and shards, and is slightly less accurate once any merge has taken place.
 

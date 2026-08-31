@@ -8,6 +8,7 @@
 #include <AggregateFunctions/Helpers.h>
 #include <AggregateFunctions/IAggregateFunction.h>
 #include <AggregateFunctions/UniqVariadicHash.h>
+#include <Columns/ColumnDecimal.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/assert_cast.h>
 #include <Core/Field.h>
@@ -15,6 +16,7 @@
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDate32.h>
 #include <DataTypes/DataTypeDateTime.h>
+#include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeIPv4andIPv6.h>
 #include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeUUID.h>
@@ -105,6 +107,8 @@ class AggregateFunctionUniqApacheHLL final : public AggregateFunctionUniqApacheH
     using Base = AggregateFunctionUniqApacheHLLBase<AggregateFunctionUniqApacheHLL<T>>;
 
 public:
+    static constexpr bool DateTime64Supported = true;
+
     using Base::Base;
 
     void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
@@ -118,7 +122,7 @@ public:
         }
         else
         {
-            const auto & value = assert_cast<const ColumnVector<T> &>(*columns[0]).getData()[row_num];
+            const auto & value = assert_cast<const ColumnVectorOrDecimal<T> &>(*columns[0]).getData()[row_num];
 
             if constexpr (std::is_same_v<T, UUID>)
             {
@@ -137,6 +141,18 @@ public:
             else if constexpr (is_over_big_int<T>)
                 /// No byte order is agreed on across implementations for these; use ClickHouse's own.
                 data.insertData(reinterpret_cast<const char *>(&value), sizeof(value), this->lg_config_k, this->target_type);
+            else if constexpr (is_decimal<T>)
+            {
+                /// A decimal, and so also `DateTime64`, is an integer counting units of its scale.
+                /// That integer is what a producer outside ClickHouse has to work from: for
+                /// `DateTime64(3)` it is the epoch milliseconds a Java caller would pass to
+                /// `update(long)`. The scale itself is part of the column type, not of the value.
+                using Native = typename T::NativeType;
+                if constexpr (sizeof(Native) <= sizeof(Int64))
+                    data.insert(static_cast<Int64>(value.value), this->lg_config_k, this->target_type);
+                else
+                    data.insertData(reinterpret_cast<const char *>(&value.value), sizeof(Native), this->lg_config_k, this->target_type);
+            }
             else if constexpr (std::is_same_v<T, IPv4>)
                 data.insert(static_cast<UInt64>(value.toUnderType()), this->lg_config_k, this->target_type);
             else if constexpr (std::is_same_v<T, BFloat16> || std::is_floating_point_v<T>)

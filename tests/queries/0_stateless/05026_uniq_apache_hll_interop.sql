@@ -60,6 +60,23 @@ SELECT hex(toString(uniqApacheHLLState(toIPv6(concat('2001:db8::', hex(number + 
 FROM numbers(5) SETTINGS max_threads = 1;
 SELECT finalizeAggregation(CAST(unhex('1C0201070C0308050018216E09FAB4750F52D5BB07DFBDE30A79BC9D0B'), 'AggregateFunction(uniqApacheHLL, IPv6)'));
 
+SELECT 'scaled integers: decimals and DateTime64';
+
+-- A `DateTime64(3)` is hashed as its epoch milliseconds, which is the `long` a caller elsewhere
+-- passes for the same instant. These five are 2020-01-01 00:00:00.000 and the next four seconds.
+SELECT hex(toString(uniqApacheHLLState(toDateTime64('2020-01-01 00:00:00.000', 3, 'UTC') + number)))
+     = '1C0201070C0308050001D4B019CBDD6F1059310D0E833938083897B304'
+FROM numbers(5) SETTINGS max_threads = 1;
+
+-- A decimal is hashed as its unscaled integer, so 0.00 .. 4.00 at scale 2 are the longs 0, 100 .. 400.
+SELECT hex(toString(uniqApacheHLLState(toDecimal64(number, 2))))
+     = '1C0201070C03080500CBD7C204895DB20CAE45C11470B74B0580E2F015'
+FROM numbers(5) SETTINGS max_threads = 1;
+
+-- Which means a decimal and the plain integer of its unscaled value produce the same sketch.
+SELECT hex(toString(uniqApacheHLLState(toDecimal64(number, 0)))) = hex(toString(uniqApacheHLLState(number)))
+FROM numbers(5) SETTINGS max_threads = 1;
+
 SELECT 'export sketches for consumption outside ClickHouse';
 
 -- `max_threads` is pinned because a state that was merged from several partial states may lay its
