@@ -11,6 +11,7 @@
 #include <Columns/ColumnsNumber.h>
 #include <Common/assert_cast.h>
 #include <Core/Field.h>
+#include <Core/UUID.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDate32.h>
 #include <DataTypes/DataTypeDateTime.h>
@@ -119,8 +120,22 @@ public:
         {
             const auto & value = assert_cast<const ColumnVector<T> &>(*columns[0]).getData()[row_num];
 
-            if constexpr (std::is_same_v<T, UUID> || std::is_same_v<T, IPv6> || is_over_big_int<T>)
-                /// Wider than the 8 bytes `update(long)` takes, so hash the value's own bytes.
+            if constexpr (std::is_same_v<T, UUID>)
+            {
+                /// ClickHouse holds a UUID as two 64-bit halves in host order, so its bytes in memory
+                /// are not the ones the textual form describes. Hash the canonical 16 bytes instead,
+                /// which is what a producer outside ClickHouse has to work from.
+                const UInt64 halves[2] = {
+                    std::byteswap(UUIDHelpers::getHighBytes(value)),
+                    std::byteswap(UUIDHelpers::getLowBytes(value)),
+                };
+                data.insertData(reinterpret_cast<const char *>(halves), sizeof(halves), this->lg_config_k, this->target_type);
+            }
+            else if constexpr (std::is_same_v<T, IPv6>)
+                /// Already held in network order, which is the canonical form.
+                data.insertData(reinterpret_cast<const char *>(&value), sizeof(value), this->lg_config_k, this->target_type);
+            else if constexpr (is_over_big_int<T>)
+                /// No byte order is agreed on across implementations for these; use ClickHouse's own.
                 data.insertData(reinterpret_cast<const char *>(&value), sizeof(value), this->lg_config_k, this->target_type);
             else if constexpr (std::is_same_v<T, IPv4>)
                 data.insert(static_cast<UInt64>(value.toUnderType()), this->lg_config_k, this->target_type);

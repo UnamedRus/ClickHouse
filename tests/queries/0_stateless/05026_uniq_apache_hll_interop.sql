@@ -44,6 +44,22 @@ SELECT finalizeAggregation(CAST(unhex('1C0201070E03080508CBD7C2042BF2FB06862FF90
 -- An externally produced empty sketch.
 SELECT finalizeAggregation(CAST(unhex('080201070C030C0000'), 'AggregateFunction(uniqApacheHLL, UInt64)'));
 
+SELECT 'types wider than the 8 bytes update(long) takes';
+
+-- lg_k = 12, HLL_4 over the canonical 16 bytes of 00000000-0000-0000-0000-00000000000{0..4}. ClickHouse
+-- holds a UUID as two 64-bit halves in host order, so hashing its bytes in memory would not agree with
+-- an external producer working from the textual form; the canonical order is hashed instead.
+SELECT hex(toString(uniqApacheHLLState(toUUID(concat('00000000-0000-0000-0000-00000000000', toString(number))))))
+     = '1C0201070C0308050050C94D05854BD10ADB8CBD053C56FB07F8FDB206'
+FROM numbers(5) SETTINGS max_threads = 1;
+SELECT finalizeAggregation(CAST(unhex('1C0201070C0308050050C94D05854BD10ADB8CBD053C56FB07F8FDB206'), 'AggregateFunction(uniqApacheHLL, UUID)'));
+
+-- The same for 2001:db8::1 .. ::5, which ClickHouse already holds in network order.
+SELECT hex(toString(uniqApacheHLLState(toIPv6(concat('2001:db8::', hex(number + 1))))))
+     = '1C0201070C0308050018216E09FAB4750F52D5BB07DFBDE30A79BC9D0B'
+FROM numbers(5) SETTINGS max_threads = 1;
+SELECT finalizeAggregation(CAST(unhex('1C0201070C0308050018216E09FAB4750F52D5BB07DFBDE30A79BC9D0B'), 'AggregateFunction(uniqApacheHLL, IPv6)'));
+
 SELECT 'export sketches for consumption outside ClickHouse';
 
 -- `max_threads` is pinned because a state that was merged from several partial states may lay its

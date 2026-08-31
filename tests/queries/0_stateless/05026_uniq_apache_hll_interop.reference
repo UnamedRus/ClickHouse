@@ -7,6 +7,11 @@ import sketches built outside ClickHouse
 84
 5
 0
+types wider than the 8 bytes update(long) takes
+1
+5
+1
+5
 export sketches for consumption outside ClickHouse
 1
 1

@@ -99,7 +99,9 @@ Calculates the approximate number of different argument values using an [Apache 
 
 The serialized state produced by the `-State` combinator carries the sketch in the Apache DataSketches HLL format, framed with a varint length prefix, so sketches can be exchanged with external services (Java, Python, C++) using the standard `-State`/`-Merge` combinators. For example, a sketch built by an upstream service can be merged with `uniqApacheHLLMerge`, and a sketch built in ClickHouse can be exported with `uniqApacheHLLState`.
 
-Integers are hashed as their 8-byte representation (matching DataSketches `update(long)`), floating-point values as an IEEE-754 double, and strings, `UUID`s and `IPv6` addresses as their raw bytes. Any other single argument, and any call with several arguments, is first hashed to one `UInt64` by ClickHouse exactly as `uniq` does; only that hash reaches the sketch, so such a sketch cannot be reproduced by an external producer.
+Integers are hashed as their 8-byte representation (matching DataSketches `update(long)`), floating-point values as an IEEE-754 double, strings as their raw bytes, `UUID`s as their canonical 16 bytes and `IPv6` addresses in network order. Sketches over those types can be reproduced by a producer outside ClickHouse that hashes the same bytes.
+
+Sketches over any other type cannot. The 128 and 256 bit integers are hashed in ClickHouse's own byte order, for which no convention is shared between implementations. Every remaining type - a decimal, `DateTime64`, an array - and every call with more than one argument is first hashed to a single value by ClickHouse, exactly as `uniq` does, and only that hash reaches the sketch.
 
 An estimate obtained by merging sketches is not the same number as one computed in a single pass over the same values, even though both are derived from identical registers: DataSketches reports the HIP estimator for a sketch that has only been updated and the composite estimator for one produced by a union. The result therefore depends on how the aggregation was partitioned across threads, parts and shards, and is slightly less accurate once any merge has taken place.
 
