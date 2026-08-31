@@ -1,0 +1,31 @@
+types the sketch hashes directly
+20
+20
+20
+20
+20
+20
+20
+20
+20
+20
+20
+20
+20
+20
+3
+types hashed by ClickHouse first
+20
+20
+20
+20
+20
+several arguments
+20
+20
+20
+20
+the parameters still apply
+20
+AggregateFunction(uniqApacheHLL(8, 'HLL_6'), UInt64, UInt64)
+no arguments is still an error

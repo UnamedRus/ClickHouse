@@ -10,12 +10,8 @@
 #include <memory>
 #include <hll.hpp>
 
-#include <Columns/ColumnsNumber.h>
 #include <Common/Exception.h>
-#include <Common/FieldVisitorConvertToNumber.h>
-#include <Common/assert_cast.h>
 #include <Core/Field.h>
-#include <DataTypes/DataTypesNumber.h>
 #include <IO/ReadBuffer.h>
 #include <IO/WriteBuffer.h>
 #include <IO/ReadHelpers.h>
@@ -28,9 +24,6 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int CORRUPTED_DATA;
-    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
-    extern const int ARGUMENT_OUT_OF_BOUND;
-    extern const int BAD_ARGUMENTS;
 }
 
 
@@ -191,95 +184,6 @@ public:
     }
 };
 
-
-/** Policy for `AggregateFunctionApacheDataSketches` implementing `uniqApacheHLL`: an approximate
-  * distinct count backed by an Apache DataSketches HLL sketch, whose serialized state is
-  * byte-compatible with the DataSketches HLL format.
-  *
-  * Parameters: `uniqApacheHLL([lg_k, [type]])(x)`, with `lg_k` in [4, 21] (default 12) and `type`
-  * one of 'HLL_4', 'HLL_6', 'HLL_8' (default 'HLL_4').
-  */
-struct HllSketchPolicy
-{
-    using Data = HllSketchData;
-
-    /// `lg_k` and the target type are held here rather than in `HllSketchData`, whose layout is two
-    /// pointers whatever they are, and a serialized sketch records its own `lg_k`. So a state built
-    /// with one parameterization can be used by a function declared with another.
-    static constexpr bool states_compatible_across_parameters = true;
-
-    uint8_t lg_config_k = 12;
-    datasketches::target_hll_type target_type = datasketches::HLL_4;
-
-    static String getName() { return "uniqApacheHLL"; }
-
-    static DataTypePtr getResultType() { return std::make_shared<DataTypeUInt64>(); }
-
-    static HllSketchPolicy parseParameters(const String & name, const Array & params)
-    {
-        HllSketchPolicy policy;
-
-        if (params.size() > 2)
-            throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-                "Aggregate function {} accepts at most two parameters (lg_k, type).", name);
-
-        if (params.size() >= 1)
-        {
-            const UInt64 lg_k_param = applyVisitor(FieldVisitorConvertToNumber<UInt64>(), params[0]);
-            if (lg_k_param < 4 || lg_k_param > 21)
-                throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND,
-                    "Parameter lg_k for aggregate function {} is out of range: [4, 21].", name);
-            policy.lg_config_k = static_cast<uint8_t>(lg_k_param);
-        }
-
-        if (params.size() == 2)
-        {
-            const String type_param = params[1].safeGet<String>();
-            if (type_param == "HLL_4")
-                policy.target_type = datasketches::HLL_4;
-            else if (type_param == "HLL_6")
-                policy.target_type = datasketches::HLL_6;
-            else if (type_param == "HLL_8")
-                policy.target_type = datasketches::HLL_8;
-            else
-                throw Exception(ErrorCodes::BAD_ARGUMENTS,
-                    "Parameter type for aggregate function {} must be one of 'HLL_4', 'HLL_6', 'HLL_8'.", name);
-        }
-
-        return policy;
-    }
-
-    template <typename V>
-    void add(Data & data, V value) const
-    {
-        data.insert(value, lg_config_k, target_type);
-    }
-
-    void addData(Data & data, const char * data_ptr, size_t size) const
-    {
-        data.insertData(data_ptr, size, lg_config_k, target_type);
-    }
-
-    void merge(Data & data, const Data & rhs) const
-    {
-        data.merge(rhs, lg_config_k, target_type);
-    }
-
-    void serialize(const Data & data, WriteBuffer & buf) const
-    {
-        data.write(buf, target_type);
-    }
-
-    void deserialize(Data & data, ReadBuffer & buf) const
-    {
-        data.read(buf, lg_config_k);
-    }
-
-    void insertResultInto(const Data & data, IColumn & to) const
-    {
-        assert_cast<ColumnUInt64 &>(to).getData().push_back(data.size(target_type));
-    }
-};
 
 }
 

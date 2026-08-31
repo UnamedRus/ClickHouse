@@ -63,7 +63,7 @@ void registerAggregateFunctionsUniq(AggregateFunctionFactory &);
 void registerAggregateFunctionUniqCombined(AggregateFunctionFactory &);
 void registerAggregateFunctionUniqUpTo(AggregateFunctionFactory &);
 #if USE_DATASKETCHES
-void registerAggregateFunctionsApacheDataSketches(AggregateFunctionFactory &);
+void registerAggregateFunctionUniqApacheHLL(AggregateFunctionFactory &);
 #endif
 void registerAggregateFunctionTopK(AggregateFunctionFactory &);
 void registerAggregateFunctionsBitwise(AggregateFunctionFactory &);
@@ -178,7 +178,7 @@ void registerAggregateFunctions()
         registerAggregateFunctionUniqCombined(factory);
         registerAggregateFunctionUniqUpTo(factory);
 #if USE_DATASKETCHES
-        registerAggregateFunctionsApacheDataSketches(factory);
+        registerAggregateFunctionUniqApacheHLL(factory);
 #endif
         registerAggregateFunctionTopK(factory);
         registerAggregateFunctionsBitwise(factory);
