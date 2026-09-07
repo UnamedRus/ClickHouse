@@ -72,7 +72,7 @@ public:
         return getName() == rhs.getName() && this->haveEqualArgumentTypes(rhs);
     }
 
-    void merge(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena *) const override
+    void mergeImpl(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena *) const override
     {
         this->data(place).merge(this->data(rhs), lg_config_k, target_type);
     }
