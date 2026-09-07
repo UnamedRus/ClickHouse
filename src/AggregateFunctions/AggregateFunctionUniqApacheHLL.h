@@ -27,13 +27,6 @@
 namespace DB
 {
 
-namespace ErrorCodes
-{
-    extern const int ARGUMENT_OUT_OF_BOUND;
-    extern const int BAD_ARGUMENTS;
-    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
-}
-
 /** Everything `uniqApacheHLL` does apart from turning a row into a sketch update.
   *
   * `lg_config_k` and the target type belong to the function rather than to the state: `HllSketchData`
