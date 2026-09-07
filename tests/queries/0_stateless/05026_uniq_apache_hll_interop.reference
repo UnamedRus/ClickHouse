@@ -23,4 +23,3 @@ export sketches for consumption outside ClickHouse
 states survive a write/read cycle through storage
 20
 1
-malformed states are rejected

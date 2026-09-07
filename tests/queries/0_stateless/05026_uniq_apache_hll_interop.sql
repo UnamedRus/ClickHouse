@@ -101,10 +101,4 @@ SELECT uniqApacheHLLMerge(s) FROM hll_interop_states;
 SELECT countDistinct(hex(toString(s))) = 4 FROM hll_interop_states;
 DROP TABLE hll_interop_states;
 
-SELECT 'malformed states are rejected';
-
--- A well-formed length prefix followed by a payload that is not a sketch. `datasketches` reports
--- this as `std::invalid_argument`, which must surface as `CORRUPTED_DATA` rather than escaping as
--- a logical error.
-SELECT finalizeAggregation(CAST(unhex('08FFFFFFFFFFFFFFFF'), 'AggregateFunction(uniqApacheHLL, UInt64)')); -- { serverError CORRUPTED_DATA }
-SELECT finalizeAggregation(CAST(unhex('0801020304050607FF'), 'AggregateFunction(uniqApacheHLL, UInt64)')); -- { serverError CORRUPTED_DATA }
+-- Malformed states are rejected as `CORRUPTED_DATA`; see `05136_uniq_apache_hll_corrupted_state.sh`.
