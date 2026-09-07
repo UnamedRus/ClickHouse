@@ -135,7 +135,7 @@ The resolution of a merged sketch is the smallest `lg_k` among its inputs, not t
         {"Basic usage", "SELECT uniqApacheHLL(number) FROM numbers(1000)", "1000"},
         {"With parameters", "SELECT uniqApacheHLL(14, 'HLL_8')(number) FROM numbers(1000)", "1000"},
     };
-    FunctionDocumentation::IntroducedIn introduced_in = {26, 6};
+    FunctionDocumentation::IntroducedIn introduced_in = {26, 9};
     FunctionDocumentation::Category category = FunctionDocumentation::Category::AggregateFunction;
     FunctionDocumentation documentation = {description, syntax, arguments, parameters, returned_value, examples, introduced_in, category};
 
