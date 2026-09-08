@@ -1,10 +1,8 @@
-#include "config.h"
-
-#if USE_DATASKETCHES
-
 #include <AggregateFunctions/AggregateFunctionUniqApacheHLL.h>
 #include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <Common/FieldVisitorConvertToNumber.h>
+
+#if USE_DATASKETCHES
 
 namespace DB
 {
