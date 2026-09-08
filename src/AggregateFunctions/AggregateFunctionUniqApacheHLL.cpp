@@ -58,12 +58,6 @@ AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
     /// accepted, so that no state can be built here that an external consumer cannot reproduce.
     /// Everything else - a decimal, a wide integer, an array, a tuple, several arguments - would
     /// have to be hashed by ClickHouse first, and no producer outside ClickHouse could match it.
-    static constexpr auto supported_types_message
-        = "only the types an Apache DataSketches HLL sketch hashes the same way outside ClickHouse "
-          "are supported: integers of at most 64 bits, Enum8, Enum16, BFloat16, Float32, Float64, "
-          "String, FixedString, UUID, IPv4, IPv6, Date, Date32, DateTime and DateTime64. "
-          "To count distinct values of any other type, use uniq, uniqCombined or uniqHLL12";
-
     if (argument_types.size() != 1)
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
             "Aggregate function {} requires exactly one argument, passed {}. Several arguments would "
@@ -106,8 +100,12 @@ AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
         return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv6::FieldType>>(lg_config_k, target_type, argument_types, params);
 
     throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
-        "Aggregate function {} does not support the argument type {}: {}.",
-        name, argument_type.getName(), supported_types_message);
+        "Aggregate function {} does not support the argument type {}: only the types an Apache "
+        "DataSketches HLL sketch hashes the same way outside ClickHouse are supported: integers of "
+        "at most 64 bits, Enum8, Enum16, BFloat16, Float32, Float64, String, FixedString, UUID, "
+        "IPv4, IPv6, Date, Date32, DateTime and DateTime64. To count distinct values of any other "
+        "type, use uniq, uniqCombined or uniqHLL12.",
+        name, argument_type.getName());
 }
 
 void registerAggregateFunctionUniqApacheHLL(AggregateFunctionFactory & factory);
