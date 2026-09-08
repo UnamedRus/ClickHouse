@@ -14,18 +14,13 @@ types the sketch hashes directly
 20
 20
 3
-types hashed by ClickHouse first
+the wrappers of an accepted type are accepted
 20
 20
-20
-20
-20
-several arguments
-20
-20
-20
-20
+a DateTime64 is the integer a caller elsewhere would hash
+1
+types no other implementation can reproduce are rejected
+one argument only
 the parameters still apply
 20
-AggregateFunction(uniqApacheHLL(8, \'HLL_6\'), UInt64, UInt64)
-no arguments is still an error
+AggregateFunction(uniqApacheHLL(8, \'HLL_6\'), UInt64)

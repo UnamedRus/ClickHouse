@@ -7,7 +7,6 @@
 #include <AggregateFunctions/HllSketchData.h>
 #include <AggregateFunctions/Helpers.h>
 #include <AggregateFunctions/IAggregateFunction.h>
-#include <AggregateFunctions/UniqVariadicHash.h>
 #include <Columns/ColumnDecimal.h>
 #include <Columns/ColumnsNumber.h>
 #include <Common/assert_cast.h>
@@ -18,7 +17,6 @@
 #include <DataTypes/DataTypeDateTime.h>
 #include <DataTypes/DataTypeDateTime64.h>
 #include <DataTypes/DataTypeIPv4andIPv6.h>
-#include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypeUUID.h>
 #include <DataTypes/DataTypesNumber.h>
 
@@ -100,8 +98,6 @@ class AggregateFunctionUniqApacheHLL final : public AggregateFunctionUniqApacheH
     using Base = AggregateFunctionUniqApacheHLLBase<AggregateFunctionUniqApacheHLL<T>>;
 
 public:
-    static constexpr bool DateTime64Supported = true;
-
     using Base::Base;
 
     void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
@@ -131,21 +127,12 @@ public:
             else if constexpr (std::is_same_v<T, IPv6>)
                 /// Already held in network order, which is the canonical form.
                 data.insertData(reinterpret_cast<const char *>(&value), sizeof(value), this->lg_config_k, this->target_type);
-            else if constexpr (is_over_big_int<T>)
-                /// No byte order is agreed on across implementations for these; use ClickHouse's own.
-                data.insertData(reinterpret_cast<const char *>(&value), sizeof(value), this->lg_config_k, this->target_type);
             else if constexpr (is_decimal<T>)
-            {
-                /// A decimal, and so also `DateTime64`, is an integer counting units of its scale.
-                /// That integer is what a producer outside ClickHouse has to work from: for
-                /// `DateTime64(3)` it is the epoch milliseconds a Java caller would pass to
-                /// `update(long)`. The scale itself is part of the column type, not of the value.
-                using Native = typename T::NativeType;
-                if constexpr (sizeof(Native) <= sizeof(Int64))
-                    data.insert(static_cast<Int64>(value.value), this->lg_config_k, this->target_type);
-                else
-                    data.insertData(reinterpret_cast<const char *>(&value.value), sizeof(Native), this->lg_config_k, this->target_type);
-            }
+                /// `DateTime64` counts units of its scale, and that integer is what a producer
+                /// outside ClickHouse works from: for `DateTime64(3)` it is the epoch milliseconds
+                /// a Java caller would pass to `update(long)`. The scale is part of the column
+                /// type rather than of the value, so both sides have to agree on it.
+                data.insert(static_cast<Int64>(value.value), this->lg_config_k, this->target_type);
             else if constexpr (std::is_same_v<T, IPv4>)
                 data.insert(static_cast<UInt64>(value.toUnderType()), this->lg_config_k, this->target_type);
             else if constexpr (std::is_same_v<T, BFloat16> || std::is_floating_point_v<T>)
@@ -155,49 +142,6 @@ public:
             else
                 data.insert(static_cast<UInt64>(value), this->lg_config_k, this->target_type);
         }
-    }
-};
-
-
-/** `uniqApacheHLL` over several columns, or over one whose type the sketch cannot hash directly
-  * (a tuple, a decimal, `DateTime64`, ...).
-  *
-  * The arguments are hashed to a single `UInt64` by ClickHouse first, exactly as `uniq` does, and only
-  * that hash reaches the sketch. Such a sketch is therefore not interoperable with an external
-  * producer, which has no way to reproduce the hash.
-  */
-template <bool is_exact, bool argument_is_tuple>
-class AggregateFunctionUniqApacheHLLVariadic final
-    : public AggregateFunctionUniqApacheHLLBase<AggregateFunctionUniqApacheHLLVariadic<is_exact, argument_is_tuple>>
-{
-    using Base = AggregateFunctionUniqApacheHLLBase<AggregateFunctionUniqApacheHLLVariadic<is_exact, argument_is_tuple>>;
-
-    size_t num_args = 0;
-
-public:
-    AggregateFunctionUniqApacheHLLVariadic(
-        uint8_t lg_config_k_,
-        datasketches::target_hll_type target_type_,
-        const DataTypes & argument_types_,
-        const Array & params_)
-        : Base(lg_config_k_, target_type_, argument_types_, params_)
-    {
-        if constexpr (argument_is_tuple)
-            num_args = typeid_cast<const DataTypeTuple &>(*argument_types_[0]).getElements().size();
-        else
-            num_args = argument_types_.size();
-    }
-
-    void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
-    {
-        auto & data = this->data(place);
-
-        /// The exact hash is 128 bits wide, which is more than `update(long)` takes.
-        const auto hash = UniqVariadicHash<is_exact, argument_is_tuple>::apply(num_args, columns, row_num);
-        if constexpr (sizeof(hash) > sizeof(UInt64))
-            data.insertData(reinterpret_cast<const char *>(&hash), sizeof(hash), this->lg_config_k, this->target_type);
-        else
-            data.insert(static_cast<UInt64>(hash), this->lg_config_k, this->target_type);
     }
 };
 

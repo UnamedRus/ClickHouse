@@ -12,9 +12,7 @@ types wider than the 8 bytes update(long) takes
 5
 1
 5
-scaled integers: decimals and DateTime64
-1
-1
+DateTime64 is hashed as the epoch time it counts
 1
 export sketches for consumption outside ClickHouse
 1

@@ -13,6 +13,7 @@ namespace ErrorCodes
 {
     extern const int ARGUMENT_OUT_OF_BOUND;
     extern const int BAD_ARGUMENTS;
+    extern const int ILLEGAL_TYPE_OF_ARGUMENT;
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
 }
 
@@ -53,55 +54,60 @@ AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
                 "Parameter type for aggregate function {} must be one of 'HLL_4', 'HLL_6', 'HLL_8'.", name);
     }
 
-    if (argument_types.empty())
+    /// Only the types an Apache DataSketches HLL sketch hashes the same way in every language are
+    /// accepted, so that no state can be built here that an external consumer cannot reproduce.
+    /// Everything else - a decimal, a wide integer, an array, a tuple, several arguments - would
+    /// have to be hashed by ClickHouse first, and no producer outside ClickHouse could match it.
+    static constexpr auto supported_types_message
+        = "only the types an Apache DataSketches HLL sketch hashes the same way outside ClickHouse "
+          "are supported: integers of at most 64 bits, Enum8, Enum16, BFloat16, Float32, Float64, "
+          "String, FixedString, UUID, IPv4, IPv6, Date, Date32, DateTime and DateTime64. "
+          "To count distinct values of any other type, use uniq, uniqCombined or uniqHLL12";
+
+    if (argument_types.size() != 1)
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-            "Incorrect number of arguments for aggregate function {}", name);
+            "Aggregate function {} requires exactly one argument, passed {}. Several arguments would "
+            "have to be hashed to one value by ClickHouse first, which no producer outside ClickHouse "
+            "can reproduce. To count distinct combinations of several columns, use uniq, uniqCombined "
+            "or uniqHLL12.",
+            name, argument_types.size());
 
-    /// Only the exact hash can read arguments that are not contiguous in memory.
-    const bool use_exact_hash_function = !isAllArgumentsContiguousInMemory(argument_types);
+    const IDataType & argument_type = *argument_types[0];
+    WhichDataType which(argument_type);
 
-    if (argument_types.size() == 1)
+    /// `DateTime64` is backed by a decimal but is accepted, unlike a decimal itself: the integer it
+    /// holds is the epoch time a caller elsewhere passes to `update(long)`.
+    if (which.isDateTime64())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime64::FieldType>>(lg_config_k, target_type, argument_types, params);
+
+    /// `createWithNumericType` also covers the 128 and 256 bit integers, which are hashed in
+    /// ClickHouse's own byte order and so have to be refused before it is reached.
+    if (!which.isInt128() && !which.isInt256() && !which.isUInt128() && !which.isUInt256())
     {
-        const IDataType & argument_type = *argument_types[0];
-
         AggregateFunctionPtr res(createWithNumericType<AggregateFunctionUniqApacheHLL>(
             argument_type, lg_config_k, target_type, argument_types, params));
         if (res)
             return res;
-
-        WhichDataType which(argument_type);
-        if (which.isDate())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate::FieldType>>(lg_config_k, target_type, argument_types, params);
-        if (which.isDate32())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate32::FieldType>>(lg_config_k, target_type, argument_types, params);
-        if (which.isDateTime())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime::FieldType>>(lg_config_k, target_type, argument_types, params);
-        if (which.isStringOrFixedString())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<String>>(lg_config_k, target_type, argument_types, params);
-        if (which.isUUID())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeUUID::FieldType>>(lg_config_k, target_type, argument_types, params);
-        if (which.isIPv4())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv4::FieldType>>(lg_config_k, target_type, argument_types, params);
-        if (which.isIPv6())
-            return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv6::FieldType>>(lg_config_k, target_type, argument_types, params);
-        {
-            AggregateFunctionPtr decimal_res(createWithDecimalType<AggregateFunctionUniqApacheHLL>(
-                argument_type, lg_config_k, target_type, argument_types, params));
-            if (decimal_res)
-                return decimal_res;
-        }
-        if (which.isTuple())
-        {
-            if (use_exact_hash_function)
-                return std::make_shared<AggregateFunctionUniqApacheHLLVariadic<true, true>>(lg_config_k, target_type, argument_types, params);
-            return std::make_shared<AggregateFunctionUniqApacheHLLVariadic<false, true>>(lg_config_k, target_type, argument_types, params);
-        }
     }
 
-    /// The variadic method is also the generic fallback for a single argument of any other type.
-    if (use_exact_hash_function)
-        return std::make_shared<AggregateFunctionUniqApacheHLLVariadic<true, false>>(lg_config_k, target_type, argument_types, params);
-    return std::make_shared<AggregateFunctionUniqApacheHLLVariadic<false, false>>(lg_config_k, target_type, argument_types, params);
+    if (which.isDate())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate::FieldType>>(lg_config_k, target_type, argument_types, params);
+    if (which.isDate32())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate32::FieldType>>(lg_config_k, target_type, argument_types, params);
+    if (which.isDateTime())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime::FieldType>>(lg_config_k, target_type, argument_types, params);
+    if (which.isStringOrFixedString())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<String>>(lg_config_k, target_type, argument_types, params);
+    if (which.isUUID())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeUUID::FieldType>>(lg_config_k, target_type, argument_types, params);
+    if (which.isIPv4())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv4::FieldType>>(lg_config_k, target_type, argument_types, params);
+    if (which.isIPv6())
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv6::FieldType>>(lg_config_k, target_type, argument_types, params);
+
+    throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
+        "Aggregate function {} does not support the argument type {}: {}.",
+        name, argument_type.getName(), supported_types_message);
 }
 
 void registerAggregateFunctionUniqApacheHLL(AggregateFunctionFactory & factory);
@@ -112,19 +118,19 @@ Calculates the approximate number of different argument values using an [Apache 
 
 The serialized state produced by the `-State` combinator carries the sketch in the Apache DataSketches HLL format, framed with a varint length prefix, so sketches can be exchanged with external services (Java, Python, C++) using the standard `-State`/`-Merge` combinators. For example, a sketch built by an upstream service can be merged with `uniqApacheHLLMerge`, and a sketch built in ClickHouse can be exported with `uniqApacheHLLState`.
 
-Integers are hashed as their 8-byte representation (matching DataSketches `update(long)`), floating-point values as an IEEE-754 double, strings as their raw bytes, `UUID`s as their canonical 16 bytes and `IPv6` addresses in network order. Sketches over those types can be reproduced by a producer outside ClickHouse that hashes the same bytes.
+Only the types that a sketch hashes the same way in every implementation are accepted, so that every state ClickHouse produces can be reproduced elsewhere. Integers of at most 64 bits are hashed as their 8-byte representation (matching DataSketches `update(long)`), floating-point values as an IEEE-754 double, strings as their raw bytes, `UUID`s as their canonical 16 bytes and `IPv6` addresses in network order.
 
-Decimals and `DateTime64` are hashed as the integer they hold - the unscaled value of the decimal, and for `DateTime64(3)` the epoch milliseconds a caller elsewhere would pass to `update(long)`. The scale belongs to the column type rather than to the value, so both sides have to agree on it.
+`Date`, `Date32`, `DateTime` and `DateTime64` are hashed as the integer they hold, which for `DateTime64(3)` is the epoch milliseconds a caller elsewhere would pass to `update(long)`. The unit belongs to the column type rather than to the value, so both sides have to agree on it.
 
-Sketches over the remaining types cannot be reproduced outside ClickHouse. The 128 and 256 bit integers, and decimals that wide, are hashed in ClickHouse's own byte order, for which no convention is shared between implementations. Every other type - an array, a tuple - and every call with more than one argument is first hashed to a single value by ClickHouse, exactly as `uniq` does, and only that hash reaches the sketch.
+Every other type is rejected, because a sketch over it would have to be built from a hash that only ClickHouse can compute: the 128 and 256 bit integers have no agreed byte order across implementations, decimals have no representation any DataSketches binding accepts, and an array or a tuple has none either. The same goes for a call with more than one argument. Use `uniq`, `uniqCombined` or `uniqHLL12` to count distinct values of those.
 
 An estimate obtained by merging sketches is not the same number as one computed in a single pass over the same values, even though both are derived from identical registers: DataSketches reports the HIP estimator for a sketch that has only been updated and the composite estimator for one produced by a union. The result therefore depends on how the aggregation was partitioned across threads, parts and shards, and is slightly less accurate once any merge has taken place.
 
 The resolution of a merged sketch is the smallest `lg_k` among its inputs, not the `lg_k` named by the type. Merging a sketch that was built with a lower `lg_k` - for example one produced by another service - permanently lowers the resolution of both the estimate and the state written back.
     )";
-    FunctionDocumentation::Syntax syntax = "uniqApacheHLL([lg_k, [type]])(x[, y, ...])";
+    FunctionDocumentation::Syntax syntax = "uniqApacheHLL([lg_k, [type]])(x)";
     FunctionDocumentation::Arguments arguments = {
-        {"x[, y, ...]", "Columns to compute the number of distinct combinations of.", {"Any"}},
+        {"x", "Column to compute the number of distinct values of.", {"(U)Int8/16/32/64", "Enum8", "Enum16", "BFloat16", "Float32", "Float64", "String", "FixedString", "UUID", "IPv4", "IPv6", "Date", "Date32", "DateTime", "DateTime64"}},
     };
     FunctionDocumentation::Parameters parameters = {
         {"lg_k", "Optional. Log-base-2 of the number of buckets, in range [4, 21]. Higher means better accuracy and more memory. Default: 12.", {"UInt8"}},
