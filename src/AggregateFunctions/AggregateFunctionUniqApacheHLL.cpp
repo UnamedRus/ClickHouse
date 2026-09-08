@@ -52,10 +52,9 @@ AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
                 "Parameter type for aggregate function {} must be one of 'HLL_4', 'HLL_6', 'HLL_8'.", name);
     }
 
-    /// Only the types an Apache DataSketches HLL sketch hashes the same way in every language are
-    /// accepted, so that no state can be built here that an external consumer cannot reproduce.
-    /// Everything else - a decimal, a wide integer, an array, a tuple, several arguments - would
-    /// have to be hashed by ClickHouse first, and no producer outside ClickHouse could match it.
+    /// Only the types a sketch hashes the same way in every language are accepted, so that no state
+    /// is built here that an external consumer cannot reproduce. Anything else - a decimal, a wide
+    /// integer, an array, a tuple, several arguments - would first need a hash only ClickHouse has.
     if (argument_types.size() != 1)
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
             "Aggregate function {} requires exactly one argument, passed {}. Several arguments would "
@@ -67,13 +66,13 @@ AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
     const IDataType & argument_type = *argument_types[0];
     WhichDataType which(argument_type);
 
-    /// `DateTime64` is backed by a decimal but is accepted, unlike a decimal itself: the integer it
-    /// holds is the epoch time a caller elsewhere passes to `update(long)`.
+    /// Backed by a decimal, but accepted unlike one: it holds the epoch time a caller elsewhere
+    /// passes to `update(long)`.
     if (which.isDateTime64())
         return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime64::FieldType>>(lg_config_k, target_type, argument_types, params);
 
-    /// `createWithNumericType` also covers the 128 and 256 bit integers, which are hashed in
-    /// ClickHouse's own byte order and so have to be refused before it is reached.
+    /// `createWithNumericType` also covers the 128 and 256 bit integers, for which no byte order is
+    /// agreed on, so they have to be refused before it is reached.
     if (!which.isInt128() && !which.isInt256() && !which.isUInt128() && !which.isUInt256())
     {
         AggregateFunctionPtr res(createWithNumericType<AggregateFunctionUniqApacheHLL>(

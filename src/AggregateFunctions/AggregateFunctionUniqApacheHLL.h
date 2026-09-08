@@ -27,9 +27,8 @@ namespace DB
 
 /** Everything `uniqApacheHLL` does apart from turning a row into a sketch update.
   *
-  * `lg_config_k` and the target type belong to the function rather than to the state: `HllSketchData`
-  * is two pointers whatever they are, and a serialized sketch records its own `lg_config_k`. Keeping
-  * them here is what lets states of different parameterisations share one binary representation.
+  * `lg_config_k` and the target type live here rather than in the state, which is what lets states
+  * of different parameterisations share one binary representation.
   */
 template <typename Derived>
 class AggregateFunctionUniqApacheHLLBase : public IAggregateFunctionDataHelper<HllSketchData, Derived>
@@ -54,10 +53,8 @@ public:
 
     bool allocatesMemoryInArena() const override { return false; }
 
-    /// The parameters configure the sketch without changing the layout of `Data`, and a serialized
-    /// sketch describes its own configuration, so a state built with one parameterisation can be used
-    /// by a function declared with another. Merging across them is lossy but well defined: a union
-    /// takes the resolution of its coarsest input.
+    /// A serialized sketch describes its own configuration, so states of different parameterisations
+    /// are interchangeable. Merging across them takes the resolution of the coarsest input.
     bool haveSameStateRepresentationImpl(const IAggregateFunction & rhs) const override
     {
         return getName() == rhs.getName() && this->haveEqualArgumentTypes(rhs);
@@ -87,10 +84,8 @@ public:
 
 /** `uniqApacheHLL` over a single column of a type the sketch can hash directly.
   *
-  * The value is normalised to one of the three shapes the DataSketches API accepts, so that a sketch
-  * built here matches one built by an external producer over the same values: integers as their
-  * 8-byte representation, floating-point values as an IEEE-754 double, and everything else as its
-  * raw bytes.
+  * The value takes one of the three shapes the DataSketches API accepts - an 8-byte integer, an
+  * IEEE-754 double, or raw bytes - so that an external producer reaches the same sketch.
   */
 template <typename T>
 class AggregateFunctionUniqApacheHLL final : public AggregateFunctionUniqApacheHLLBase<AggregateFunctionUniqApacheHLL<T>>
@@ -115,9 +110,8 @@ public:
 
             if constexpr (std::is_same_v<T, UUID>)
             {
-                /// ClickHouse holds a UUID as two 64-bit halves in host order, so its bytes in memory
-                /// are not the ones the textual form describes. Hash the canonical 16 bytes instead,
-                /// which is what a producer outside ClickHouse has to work from.
+                /// ClickHouse holds a UUID as two 64-bit halves in host order, so its bytes in
+                /// memory are not the canonical 16 an external producer works from.
                 const UInt64 halves[2] = {
                     std::byteswap(UUIDHelpers::getHighBytes(value)),
                     std::byteswap(UUIDHelpers::getLowBytes(value)),
@@ -128,10 +122,8 @@ public:
                 /// Already held in network order, which is the canonical form.
                 data.insertData(reinterpret_cast<const char *>(&value), sizeof(value), this->lg_config_k, this->target_type);
             else if constexpr (is_decimal<T>)
-                /// `DateTime64` counts units of its scale, and that integer is what a producer
-                /// outside ClickHouse works from: for `DateTime64(3)` it is the epoch milliseconds
-                /// a Java caller would pass to `update(long)`. The scale is part of the column
-                /// type rather than of the value, so both sides have to agree on it.
+                /// `DateTime64(3)` holds the epoch milliseconds a caller elsewhere passes to
+                /// `update(long)`. The scale belongs to the type, so both sides must agree on it.
                 data.insert(static_cast<Int64>(value.value), this->lg_config_k, this->target_type);
             else if constexpr (std::is_same_v<T, IPv4>)
                 data.insert(static_cast<UInt64>(value.toUnderType()), this->lg_config_k, this->target_type);
