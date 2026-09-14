@@ -482,6 +482,9 @@ RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::No
 
     if (const auto * aggregating_step = typeid_cast<const AggregatingStep *>(step))
     {
+        /// A predicate here is a HAVING. The planner has already pushed its key-only conjuncts below
+        /// the aggregation, so what is left is written over aggregate results, which no step below
+        /// produces: composition refuses it instead of sizing the relation from a condition on groups.
         auto stats = estimateReadRowsCount(*node.children.front(), filter);
         auto aggregation_stats = estimateAggregatingStepStats(*aggregating_step, stats);
         return aggregation_stats;
