@@ -770,22 +770,39 @@ bool allOutputsDependsOnlyOnAllowedNodes(
     return res;
 }
 
-const ActionsDAG::Node * composeFilterThroughDag(
-    const ActionsDAG::Node * outer, const ActionsDAG & dag, std::optional<ActionsDAG> & storage)
+bool allInputsProducedBy(const ActionsDAG & filter_dag, const ActionsDAG & step_dag)
 {
-    auto outer_dag = ActionsDAG::buildFilterActionsDAG({outer});
-    if (!outer_dag || outer_dag->getOutputs().empty())
+    for (const auto * input : filter_dag.getInputs())
+    {
+        if (!step_dag.tryFindInOutputs(input->result_name))
+            return false;
+    }
+    return true;
+}
+
+bool composeThroughStepDag(ActionsDAG & filter_dag, ActionsDAG step_dag, UnresolvedInput unresolved_input)
+{
+    if (unresolved_input == UnresolvedInput::Fail && !allInputsProducedBy(filter_dag, step_dag))
+        return false;
+
+    filter_dag = ActionsDAG::merge(std::move(step_dag), std::move(filter_dag));
+    return true;
+}
+
+const ActionsDAG::Node * composeThroughStepDag(
+    const ActionsDAG::Node * predicate,
+    const ActionsDAG & step_dag,
+    std::optional<ActionsDAG> & storage,
+    UnresolvedInput unresolved_input)
+{
+    auto predicate_dag = ActionsDAG::buildFilterActionsDAG({predicate});
+    if (!predicate_dag || predicate_dag->getOutputs().empty())
         return nullptr;
 
-    /// `merge` wires the second DAG's inputs to the first's outputs by name, so an input this step
-    /// does not produce would survive as a dangling one naming a column absent below.
-    for (const auto * input : outer_dag->getInputs())
-    {
-        if (!dag.tryFindInOutputs(input->result_name))
-            return nullptr;
-    }
+    if (!composeThroughStepDag(*predicate_dag, step_dag.clone(), unresolved_input))
+        return nullptr;
 
-    storage = ActionsDAG::merge(dag.clone(), std::move(*outer_dag));
+    storage = std::move(*predicate_dag);
     if (storage->getOutputs().empty())
         return nullptr;
     return storage->getOutputs().front();

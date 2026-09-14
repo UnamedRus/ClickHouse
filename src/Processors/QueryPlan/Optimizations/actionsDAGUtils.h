@@ -157,14 +157,38 @@ bool allOutputsDependsOnlyOnAllowedNodes(
 bool allOutputsDependsOnlyOnAllowedNodes(
     const NodeSet & irreducible_nodes, const MatchedTrees::Matches & matches, const ActionsDAG::Node * node, NodeMap & visited);
 
-/// Re-express `outer`, a predicate over the OUTPUT columns of `dag`, over the INPUT columns of `dag`,
-/// so it can be carried one step further down the plan. A step renames what it passes through
-/// (`Change column names to column identifiers`, `Project names`), so a predicate taken from above
-/// names columns that do not exist below it. `optimizePrimaryKeyConditionAndLimit` composes the same
-/// way before index analysis; anything reasoning about a predicate below the step that produced its
-/// columns needs it. `storage` owns the composed DAG and must outlive the returned node.
-/// Returns nullptr when the predicate cannot be re-expressed; callers must then drop it.
-const ActionsDAG::Node * composeFilterThroughDag(
-    const ActionsDAG::Node * outer, const ActionsDAG & dag, std::optional<ActionsDAG> & storage);
+/// What to do with an input of the composed predicate that `step_dag` does not produce.
+/// `ActionsDAG::mergeInplace` offers a third treatment, removing such inputs, for a caller that
+/// supplies its own header - see `convertJoinToIn` and `AggregationPushdown`.
+enum class UnresolvedInput : uint8_t
+{
+    /// The column exists, just further down: keep the dangling input and let a lower step resolve
+    /// it. This is plain `ActionsDAG::merge` behaviour, which keeps inputs to preserve the header.
+    Keep,
+    /// The predicate does not describe the relation below this step at all - a `HAVING` over
+    /// aggregate results, say - so composing it would attribute a condition to the wrong relation.
+    Fail,
+};
+
+/// Does `filter_dag` reference only columns that `step_dag` produces?
+bool allInputsProducedBy(const ActionsDAG & filter_dag, const ActionsDAG & step_dag);
+
+/// Re-express `filter_dag`, whose inputs are the OUTPUT columns of `step_dag`, over the INPUT columns
+/// of `step_dag`, so it can be carried one step further down the plan. A step renames what it passes
+/// through (`Change column names to column identifiers`, `Project names`), so a predicate taken from
+/// above names columns that do not exist below it: index analysis cannot match it against the key and
+/// the selectivity estimator cannot resolve it against the table's statistics.
+///
+/// Outputs are preserved, so a caller identifying its predicate by column name keeps it. Returns
+/// false, leaving `filter_dag` untouched, only under `UnresolvedInput::Fail`.
+bool composeThroughStepDag(ActionsDAG & filter_dag, ActionsDAG step_dag, UnresolvedInput unresolved_input);
+
+/// The same, for a caller holding a single predicate node instead of a DAG. `storage` owns the
+/// composed DAG and must outlive the returned node.
+const ActionsDAG::Node * composeThroughStepDag(
+    const ActionsDAG::Node * predicate,
+    const ActionsDAG & step_dag,
+    std::optional<ActionsDAG> & storage,
+    UnresolvedInput unresolved_input);
 
 }

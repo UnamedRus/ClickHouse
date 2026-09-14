@@ -431,7 +431,7 @@ RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::No
         std::optional<ActionsDAG> composed_dag;
         const auto * filter_to_push = filter;
         if (filter)
-            filter_to_push = composeFilterThroughDag(filter, expression_step->getExpression(), composed_dag);
+            filter_to_push = composeThroughStepDag(filter, expression_step->getExpression(), composed_dag, UnresolvedInput::Fail);
 
         auto stats = estimateReadRowsCount(*node.children.front(), filter_to_push);
         /// The dropped predicate is not accounted for, so do not pass the estimate off as exact.
@@ -456,7 +456,7 @@ RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::No
 
         if (filter)
         {
-            const auto * composed = composeFilterThroughDag(filter, dag, composed_dag);
+            const auto * composed = composeThroughStepDag(filter, dag, composed_dag, UnresolvedInput::Fail);
             if (!composed)
                 outer_filter_dropped = true;
             else if (!predicate)

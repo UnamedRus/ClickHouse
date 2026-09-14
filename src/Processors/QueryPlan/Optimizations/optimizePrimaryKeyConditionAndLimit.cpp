@@ -5,6 +5,7 @@
 #include <Processors/QueryPlan/LimitStep.h>
 #include <Processors/QueryPlan/SourceStepWithFilter.h>
 #include <Processors/QueryPlan/ObjectFilterStep.h>
+#include <Processors/QueryPlan/Optimizations/actionsDAGUtils.h>
 
 #include <list>
 
@@ -35,7 +36,7 @@ void optimizePrimaryKeyConditionAndLimit(const Stack & stack)
     auto compose = [&](ActionsDAG filter_dag)
     {
         for (auto it = expression_dags.rbegin(); it != expression_dags.rend(); ++it)
-            filter_dag = ActionsDAG::merge((*it)->clone(), std::move(filter_dag));
+            composeThroughStepDag(filter_dag, (*it)->clone(), UnresolvedInput::Keep);
         return filter_dag;
     };
 

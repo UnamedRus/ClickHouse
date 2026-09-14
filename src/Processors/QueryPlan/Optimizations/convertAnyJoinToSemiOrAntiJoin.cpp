@@ -10,6 +10,7 @@
 #include <Processors/QueryPlan/FilterStep.h>
 #include <Processors/QueryPlan/JoinStepLogical.h>
 #include <Processors/QueryPlan/Optimizations/Utils.h>
+#include <Processors/QueryPlan/Optimizations/actionsDAGUtils.h>
 
 namespace DB::QueryPlanOptimizations
 {
@@ -30,7 +31,8 @@ FilterResult filterResultForMatchedRows(ActionsDAG pre_actions_dag, const Action
     if (dagContainsNonDeterministicFunction(filter_dag) || dagContainsNonDeterministicFunction(pre_actions_dag))
         return FilterResult::UNKNOWN;
 
-    auto combined_dag = ActionsDAG::merge(std::move(pre_actions_dag), filter_dag.clone());
+    auto combined_dag = filter_dag.clone();
+    composeThroughStepDag(combined_dag, std::move(pre_actions_dag), UnresolvedInput::Keep);
     ActionsDAG::IntermediateExecutionResult combined_dag_input;
 
     const auto * filter_node = combined_dag.tryFindInOutputs(filter_column_name);
