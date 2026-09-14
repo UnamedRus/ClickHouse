@@ -157,4 +157,14 @@ bool allOutputsDependsOnlyOnAllowedNodes(
 bool allOutputsDependsOnlyOnAllowedNodes(
     const NodeSet & irreducible_nodes, const MatchedTrees::Matches & matches, const ActionsDAG::Node * node, NodeMap & visited);
 
+/// Re-express `outer`, a predicate over the OUTPUT columns of `dag`, over the INPUT columns of `dag`,
+/// so it can be carried one step further down the plan. A step renames what it passes through
+/// (`Change column names to column identifiers`, `Project names`), so a predicate taken from above
+/// names columns that do not exist below it. `optimizePrimaryKeyConditionAndLimit` composes the same
+/// way before index analysis; anything reasoning about a predicate below the step that produced its
+/// columns needs it. `storage` owns the composed DAG and must outlive the returned node.
+/// Returns nullptr when the predicate cannot be re-expressed; callers must then drop it.
+const ActionsDAG::Node * composeFilterThroughDag(
+    const ActionsDAG::Node * outer, const ActionsDAG & dag, std::optional<ActionsDAG> & storage);
+
 }

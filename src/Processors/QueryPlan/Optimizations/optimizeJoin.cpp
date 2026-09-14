@@ -287,34 +287,6 @@ static RelationStats estimateAggregatingStepStats(const AggregatingStep & aggreg
     return aggregation_stats;
 }
 
-/// Re-express `outer` - a predicate over the OUTPUT columns of `dag` - in terms of the INPUT columns
-/// of `dag`. A step's expression renames the columns it passes through (`Change column names to
-/// column identifiers`, `Project names`), so a predicate taken from above names columns that do not
-/// exist below it. Handing it down unchanged leaves the selectivity estimator unable to resolve it
-/// against the table's statistics, and the relation is then sized from a blanket default instead of
-/// from the predicate. Returns nullptr when the predicate cannot be re-expressed; the caller must
-/// then drop it rather than estimate with it.
-static const ActionsDAG::Node * composeFilterThroughDag(
-    const ActionsDAG::Node * outer, const ActionsDAG & dag, std::optional<ActionsDAG> & storage)
-{
-    auto outer_dag = ActionsDAG::buildFilterActionsDAG({outer});
-    if (!outer_dag || outer_dag->getOutputs().empty())
-        return nullptr;
-
-    /// `merge` wires the second DAG's inputs to the first's outputs by name. An input this step does
-    /// not produce would survive the merge as a dangling input naming a column absent below it.
-    for (const auto * input : outer_dag->getInputs())
-    {
-        if (!dag.tryFindInOutputs(input->result_name))
-            return nullptr;
-    }
-
-    storage = ActionsDAG::merge(dag.clone(), std::move(*outer_dag));
-    if (storage->getOutputs().empty())
-        return nullptr;
-    return storage->getOutputs().front();
-}
-
 RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::Node * filter = nullptr);
 RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::Node * filter)
 {
@@ -454,17 +426,15 @@ RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::No
 
     if (const auto * expression_step = typeid_cast<const ExpressionStep *>(step); expression_step && !expression_step->getExpression().hasArrayJoin())
     {
-        /// The expression renames the columns it passes through, so a predicate from above has to be
-        /// composed through it before it can describe anything below. The DAG holding the composed
-        /// predicate is owned here and must outlive the recursive call.
+        /// The expression renames what it passes through, so a predicate from above has to be
+        /// composed through it. The composed DAG must outlive the recursive call below.
         std::optional<ActionsDAG> composed_dag;
         const auto * filter_to_push = filter;
         if (filter)
             filter_to_push = composeFilterThroughDag(filter, expression_step->getExpression(), composed_dag);
 
         auto stats = estimateReadRowsCount(*node.children.front(), filter_to_push);
-        /// A predicate that could not be composed was dropped, so the estimate no longer accounts
-        /// for it. Say so rather than let it pass for a number derived from the whole condition.
+        /// The dropped predicate is not accounted for, so do not pass the estimate off as exact.
         if (filter && !filter_to_push)
             stats.imprecise_estimate = true;
         remapColumnStats(stats.column_stats, expression_step->getExpression());
@@ -476,11 +446,9 @@ RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::No
         const auto & dag = filter_step->getExpression();
         const auto * predicate = static_cast<const ActionsDAG::Node *>(dag.tryFindInOutputs(filter_step->getFilterColumnName()));
 
-        /// Both predicates of two stacked `FilterStep`s describe the same relation, so both have to
-        /// reach the estimator: passing only this step's own down drops the other one's selectivity
-        /// and over-estimates the relation, which is what the join order is sized from. The incoming
-        /// one speaks this step's output names, so it is composed through this step's expression
-        /// first; both DAGs built below are owned here and must outlive the recursive call.
+        /// Two stacked `FilterStep`s describe the same relation, so both predicates have to reach
+        /// the estimator - passing only this step's own down over-estimates it. The incoming one
+        /// speaks this step's output names, so compose it first. Both DAGs must outlive the call.
         std::optional<ActionsDAG> composed_dag;
         std::optional<ActionsDAG> conjunction_dag;
         const auto * filter_to_push = predicate;
@@ -495,8 +463,8 @@ RelationStats estimateReadRowsCount(QueryPlan::Node & node, const ActionsDAG::No
                 filter_to_push = composed;
             else
             {
-                /// Both are expressed over this step's input columns now, so combining them by name
-                /// makes each name denote the same column on both sides.
+                /// Both speak this step's input columns now, so a name denotes the same column
+                /// on either side.
                 conjunction_dag = ActionsDAG::buildFilterActionsDAG({composed, predicate});
                 if (!conjunction_dag || conjunction_dag->getOutputs().empty())
                     outer_filter_dropped = true;

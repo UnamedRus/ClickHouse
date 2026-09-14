@@ -770,4 +770,25 @@ bool allOutputsDependsOnlyOnAllowedNodes(
     return res;
 }
 
+const ActionsDAG::Node * composeFilterThroughDag(
+    const ActionsDAG::Node * outer, const ActionsDAG & dag, std::optional<ActionsDAG> & storage)
+{
+    auto outer_dag = ActionsDAG::buildFilterActionsDAG({outer});
+    if (!outer_dag || outer_dag->getOutputs().empty())
+        return nullptr;
+
+    /// `merge` wires the second DAG's inputs to the first's outputs by name, so an input this step
+    /// does not produce would survive as a dangling one naming a column absent below.
+    for (const auto * input : outer_dag->getInputs())
+    {
+        if (!dag.tryFindInOutputs(input->result_name))
+            return nullptr;
+    }
+
+    storage = ActionsDAG::merge(dag.clone(), std::move(*outer_dag));
+    if (storage->getOutputs().empty())
+        return nullptr;
+    return storage->getOutputs().front();
+}
+
 }
