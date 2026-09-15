@@ -169,6 +169,7 @@ public:
         , join_on_keys(join_on_keys_)
         , additional_filter_expression(additional_filter_expression_)
         , additional_filter_required_rhs_pos(additional_filter_required_rhs_pos_)
+        , fused_residual_compare(join.fused_residual_compare)
         , rows_to_add(left_block_.rows())
         , enable_prefetch(join.enableSoftwarePrefetch())
         , is_join_get(is_join_get_)
@@ -323,6 +324,7 @@ public:
     std::vector<JoinOnKeyColumns> join_on_keys;
     ExpressionActionsPtr additional_filter_expression;
     const std::vector<std::pair<size_t, size_t>> & additional_filter_required_rhs_pos;
+    std::optional<HashJoin::FusedResidualCompare> fused_residual_compare;
 
     size_t max_joined_block_rows = 0;
     size_t rows_to_add;

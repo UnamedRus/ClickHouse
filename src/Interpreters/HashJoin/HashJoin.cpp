@@ -377,6 +377,54 @@ HashJoin::HashJoin(
             }
             ++pos;
         }
+
+        /// See `FusedResidualCompare`. Recognised strictly: anything else keeps the generic path.
+        if (additional_filter_required_rhs_pos.size() == 1 && required_cols.size() == 2)
+        {
+            static const std::unordered_map<std::string_view, FusedResidualCompare::Op> comparisons{
+                {"equals", FusedResidualCompare::Op::Equals},
+                {"notEquals", FusedResidualCompare::Op::NotEquals},
+                {"less", FusedResidualCompare::Op::Less},
+                {"lessOrEquals", FusedResidualCompare::Op::LessOrEquals},
+                {"greater", FusedResidualCompare::Op::Greater},
+                {"greaterOrEquals", FusedResidualCompare::Op::GreaterOrEquals},
+            };
+
+            const auto & dag = table_join->getMixedJoinExpression()->getActionsDAG();
+            const auto & outputs = dag.getOutputs();
+            const ActionsDAG::Node * predicate = outputs.empty() ? nullptr : outputs.back();
+            while (predicate && predicate->type == ActionsDAG::ActionType::ALIAS && predicate->children.size() == 1)
+                predicate = predicate->children.front();
+
+            const bool is_plain_comparison = predicate && predicate->type == ActionsDAG::ActionType::FUNCTION
+                && predicate->function_base && predicate->children.size() == 2
+                && predicate->children[0]->type == ActionsDAG::ActionType::INPUT
+                && predicate->children[1]->type == ActionsDAG::ActionType::INPUT
+                && comparisons.contains(predicate->function_base->getName());
+
+            if (is_plain_comparison)
+            {
+                const size_t right_required_pos = additional_filter_required_rhs_pos.front().first;
+                const size_t right_stored_pos = additional_filter_required_rhs_pos.front().second;
+
+                auto left_it = required_cols.begin();
+                std::advance(left_it, right_required_pos == 0 ? 1 : 0);
+                auto right_it = required_cols.begin();
+                std::advance(right_it, right_required_pos);
+
+                /// `required_cols` is in the order the inputs were declared, which is the order the
+                /// arguments appear in, so the right column being the second required one means the
+                /// left column is the first argument.
+                const bool left_is_first = right_required_pos == 1;
+
+                if (left_it->type->equals(*right_it->type) && WhichDataType(left_it->type).isUInt64())
+                    fused_residual_compare = FusedResidualCompare{
+                        left_it->name,
+                        right_stored_pos,
+                        comparisons.at(predicate->function_base->getName()),
+                        left_is_first};
+            }
+        }
     }
 }
 

@@ -1002,6 +1002,48 @@ size_t HashJoinMethods<KIND, STRICTNESS, MapsTemplate>::joinRightColumnsWithAddi
     IColumn::Offsets row_replicate_offset;
     row_replicate_offset.reserve(left_block_rows);
 
+    /// Test the residual comparison while walking the bucket rather than gathering, replicating and
+    /// evaluating over every candidate. The candidates of one bucket are consecutive ref words when
+    /// the build side is ordered by the join key, so this reads a near-contiguous range.
+    const PaddedPODArray<UInt64> * fused_left_data = nullptr;
+    size_t fused_right_position = 0;
+    HashJoin::FusedResidualCompare::Op fused_op = HashJoin::FusedResidualCompare::Op::Equals;
+    bool fused_left_is_first = true;
+    if (added_columns.fused_residual_compare && !flag_per_row && added_columns.join_on_keys.size() == 1)
+    {
+        const auto & fused = *added_columns.fused_residual_compare;
+        fused_right_position = fused.right_stored_position;
+        fused_op = fused.op;
+        fused_left_is_first = fused.left_is_first_argument;
+        if (const auto * left_column = added_columns.left_block.findByName(fused.left_column_name))
+        {
+            if (const auto * left_vector = typeid_cast<const ColumnUInt64 *>(left_column->column.get()))
+                fused_left_data = &left_vector->getData();
+        }
+    }
+
+    /// ANY and SEMI keep only the first surviving candidate, and ANTI only needs to know that one
+    /// exists, so the walk can stop there. On the generic path that is decided in a later pass, after
+    /// every candidate has already been gathered and evaluated.
+    constexpr bool fused_stops_at_first_match
+        = join_features.is_any_join || join_features.is_semi_join || join_features.is_anti_join;
+
+    auto fused_matches = [&](UInt64 left_value, UInt64 right_value)
+    {
+        const UInt64 first = fused_left_is_first ? left_value : right_value;
+        const UInt64 second = fused_left_is_first ? right_value : left_value;
+        switch (fused_op)
+        {
+            case HashJoin::FusedResidualCompare::Op::Equals: return first == second;
+            case HashJoin::FusedResidualCompare::Op::NotEquals: return first != second;
+            case HashJoin::FusedResidualCompare::Op::Less: return first < second;
+            case HashJoin::FusedResidualCompare::Op::LessOrEquals: return first <= second;
+            case HashJoin::FusedResidualCompare::Op::Greater: return first > second;
+            case HashJoin::FusedResidualCompare::Op::GreaterOrEquals: return first >= second;
+        }
+        return false;
+    };
+
     size_t max_joined_rows = added_columns.max_joined_block_rows;
     if (max_joined_rows == 0)
         max_joined_rows = std::numeric_limits<size_t>::max();
@@ -1048,6 +1090,29 @@ size_t HashJoinMethods<KIND, STRICTNESS, MapsTemplate>::joinRightColumnsWithAddi
                 {
                     auto & mapped = find_result.getMapped();
                     find_results.push_back(find_result);
+
+                    if (fused_left_data)
+                    {
+                        const UInt64 left_value = (*fused_left_data)[ind];
+                        for (const UInt64 ref_word : refsOf(mapped.word))
+                        {
+                            const auto * stored_block
+                                = added_columns.lazy_output.stored_columns[refWordBlockNo(ref_word)];
+                            const auto [source_column, row_position]
+                                = getBlockColumnAndRow(stored_block, refWordRowNo(ref_word), fused_right_position);
+                            const UInt64 right_value
+                                = static_cast<const ColumnUInt64 &>(*source_column).getData()[row_position];
+                            if (fused_matches(left_value, right_value))
+                            {
+                                selected_rows.push_back(ref_word);
+                                ++current_added_rows;
+                                if constexpr (fused_stops_at_first_match)
+                                    break;
+                            }
+                        }
+                        continue;
+                    }
+
                     /// We don't add missing in addFoundRowAll here. we will add it after filter is applied.
                     /// it's different from `joinRightColumns`.
                     PreSelectedRows selected_rows_view{selected_rows};
@@ -1078,7 +1143,16 @@ size_t HashJoinMethods<KIND, STRICTNESS, MapsTemplate>::joinRightColumnsWithAddi
     left_block_rows = row_replicate_offset.size();
 
     {
-        auto filter_col = buildAdditionalFilter(selector, selected_rows, row_replicate_offset, added_columns);
+        ColumnPtr filter_col;
+        if (fused_left_data)
+        {
+            /// Every candidate collected above already passed the comparison.
+            auto passed = ColumnUInt8::create();
+            passed->insertMany(1, selected_rows.size());
+            filter_col = std::move(passed);
+        }
+        else
+            filter_col = buildAdditionalFilter(selector, selected_rows, row_replicate_offset, added_columns);
 
         const PaddedPODArray<UInt8> & filter_flags = assert_cast<const ColumnUInt8 &>(*filter_col).getData();
 

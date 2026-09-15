@@ -1,0 +1,16 @@
+inner all, equality residual
+16000	16000	1
+inner all, ordering residual
+8000	8000	1
+inner all, ordering residual reversed
+8000	8000	1
+left any
+4000	4000	1
+left semi
+2000	2000	1
+left anti
+2000	2000	1
+no candidate survives
+0	0	1
+nullable right column
+6000	6000	1

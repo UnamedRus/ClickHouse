@@ -623,6 +623,23 @@ public:
     static bool isUsedByAnotherAlgorithm(const TableJoin & table_join);
     static bool canRemoveColumnsFromLeftBlock(const TableJoin & table_join);
 
+    /// A mixed JOIN ON condition of the shape `<left column> OP <right column>`, where OP is a plain
+    /// comparison and both columns are the same fixed-width type, can be tested while walking the
+    /// bucket. The generic path instead gathers every candidate's right value into a column,
+    /// replicates the left value alongside it and evaluates the expression over the pair - three
+    /// passes over every candidate, where a bucket contributes one candidate per row.
+    struct FusedResidualCompare
+    {
+        enum class Op : uint8_t { Equals, NotEquals, Less, LessOrEquals, Greater, GreaterOrEquals };
+
+        String left_column_name;
+        size_t right_stored_position;
+        Op op;
+        /// Whether the left column is the first argument, which fixes the direction of an ordering OP.
+        bool left_is_first_argument;
+    };
+    std::optional<FusedResidualCompare> fused_residual_compare;
+
 private:
     friend class NotJoinedHash;
     friend class JoinSource;
