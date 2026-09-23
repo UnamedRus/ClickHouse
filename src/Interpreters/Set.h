@@ -215,6 +215,65 @@ using ConstSetPtr = std::shared_ptr<const Set>;
 using Sets = std::vector<SetPtr>;
 
 
+/// Shared by `MergeTreeSetIndex` and `MergeTreeKeyRangeSet`: both search lexicographically
+/// sorted key entries against a granule's key ranges, and differ only in what an entry is.
+namespace SetIndexDetail
+{
+
+/** Class that represents single value with possible infinities.
+  * Single field is stored in column for more optimal inplace comparisons with other regular columns.
+  * Extracting fields from columns and further their comparison is suboptimal and requires extra copying.
+  */
+struct FieldValue
+{
+    explicit FieldValue(MutableColumnPtr && column_, bool block_memory_tracker_ = false)
+        : column(std::move(column_)), block_memory_tracker(block_memory_tracker_) {}
+    void update(const Field & x);
+
+    bool isNormal() const { return !value.isPositiveInfinity() && !value.isNegativeInfinity(); }
+    bool isPositiveInfinity() const { return value.isPositiveInfinity(); }
+    bool isNegativeInfinity() const { return value.isNegativeInfinity(); }
+
+    Field value; // Null, -Inf, +Inf
+
+    // If value is Null, uses the actual value in column
+    MutableColumnPtr column;
+
+    /// True when the column belongs to the thread-local buffer of getFieldValueRangesBuffer,
+    /// which outlives the query; its reallocations must not be charged to the current query.
+    bool block_memory_tracker = false;
+};
+
+struct FieldValueRange
+{
+    FieldValue left;
+    FieldValue right;
+    bool left_included = false;
+    bool right_included = false;
+
+    explicit FieldValueRange(const IColumn & prototype, bool block_memory_tracker = false)
+        : left(prototype.cloneEmpty(), block_memory_tracker), right(prototype.cloneEmpty(), block_memory_tracker) {}
+};
+
+using FieldValueRanges = std::vector<FieldValueRange>;
+
+static int compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row);
+
+/// The two corner searches over lexicographically sorted entries. `begin_corners` and
+/// `end_corners` are the column arrays each search compares against; for a set of points they
+/// are the same array, which is why the caller passes it twice rather than the searches
+/// assuming it.
+static std::pair<size_t, size_t> lexCornerSearch(
+    const Columns & begin_corners,
+    const Columns & end_corners,
+    const FieldValueRanges & ranges,
+    size_t tuple_size,
+    size_t set_size);
+
+static bool isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size);
+
+}
+
 /// Class for checkInRange function.
 class MergeTreeSetIndex
 {
@@ -248,57 +307,9 @@ public:
     const std::vector<KeyTuplePositionMapping> & getIndexesMapping() const { return indexes_mapping; }
 
 private:
-    /** Class that represents single value with possible infinities.
-      * Single field is stored in column for more optimal inplace comparisons with other regular columns.
-      * Extracting fields from columns and further their comparison is suboptimal and requires extra copying.
-      */
-    struct FieldValue
-    {
-        explicit FieldValue(MutableColumnPtr && column_, bool block_memory_tracker_ = false)
-            : column(std::move(column_)), block_memory_tracker(block_memory_tracker_) {}
-        void update(const Field & x);
-
-        bool isNormal() const { return !value.isPositiveInfinity() && !value.isNegativeInfinity(); }
-        bool isPositiveInfinity() const { return value.isPositiveInfinity(); }
-        bool isNegativeInfinity() const { return value.isNegativeInfinity(); }
-
-        Field value; // Null, -Inf, +Inf
-
-        // If value is Null, uses the actual value in column
-        MutableColumnPtr column;
-
-        /// True when the column belongs to the thread-local buffer of getFieldValueRangesBuffer,
-        /// which outlives the query; its reallocations must not be charged to the current query.
-        bool block_memory_tracker = false;
-    };
-
-    struct FieldValueRange
-    {
-        FieldValue left;
-        FieldValue right;
-        bool left_included = false;
-        bool right_included = false;
-
-        explicit FieldValueRange(const IColumn & prototype, bool block_memory_tracker = false)
-            : left(prototype.cloneEmpty(), block_memory_tracker), right(prototype.cloneEmpty(), block_memory_tracker) {}
-    };
-
-    using FieldValueRanges = std::vector<FieldValueRange>;
-
-    static int compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row);
-
-    /// The two corner searches over lexicographically sorted entries. `begin_corners` and
-    /// `end_corners` are the column arrays each search compares against; for a set of points they
-    /// are the same array, which is why the caller passes it twice rather than the searches
-    /// assuming it.
-    static std::pair<size_t, size_t> lexCornerSearch(
-        const Columns & begin_corners,
-        const Columns & end_corners,
-        const FieldValueRanges & ranges,
-        size_t tuple_size,
-        size_t set_size);
-
-    static bool isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size);
+    using FieldValue = SetIndexDetail::FieldValue;
+    using FieldValueRange = SetIndexDetail::FieldValueRange;
+    using FieldValueRanges = SetIndexDetail::FieldValueRanges;
 
     /// Everything after the key ranges have been resolved: the binary searches and the
     /// at-most-one-element shortcut. The two `checkInRange` overloads differ only in how they

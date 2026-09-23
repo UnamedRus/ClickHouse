@@ -742,7 +742,7 @@ MergeTreeSetIndex::MergeTreeSetIndex(const Columns & set_elements, std::vector<K
         [](const ColumnPtr & column) { return column->valuesHaveFixedSize(); });
 }
 
-MergeTreeSetIndex::FieldValueRanges & MergeTreeSetIndex::getFieldValueRangesBuffer(FieldValueRanges & scratch) const
+SetIndexDetail::FieldValueRanges & MergeTreeSetIndex::getFieldValueRangesBuffer(FieldValueRanges & scratch) const
 {
     size_t tuple_size = indexes_mapping.size();
 
@@ -785,7 +785,7 @@ MergeTreeSetIndex::FieldValueRanges & MergeTreeSetIndex::getFieldValueRangesBuff
     return cache.back().ranges;
 }
 
-int MergeTreeSetIndex::compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row)
+int SetIndexDetail::compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row)
 {
     /// lhs < rhs return -1
     /// lhs == rhs return 0
@@ -797,7 +797,7 @@ int MergeTreeSetIndex::compareValue(const IColumn & lhs, const FieldValue & rhs,
     return lhs.compareAt(row, 0, *rhs.column, 1);
 }
 
-std::pair<size_t, size_t> MergeTreeSetIndex::lexCornerSearch(
+std::pair<size_t, size_t> SetIndexDetail::lexCornerSearch(
     const Columns & begin_corners,
     const Columns & end_corners,
     const FieldValueRanges & ranges,
@@ -855,7 +855,7 @@ std::pair<size_t, size_t> MergeTreeSetIndex::lexCornerSearch(
     return {begin, end};
 }
 
-bool MergeTreeSetIndex::isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size)
+bool SetIndexDetail::isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size)
 {
     for (size_t i = 0; i < tuple_size; ++i)
     {
@@ -879,7 +879,7 @@ bool MergeTreeSetIndex::isAtMostOneElementRange(const FieldValueRanges & ranges,
 
 BoolMask MergeTreeSetIndex::finishCheckInRange(const FieldValueRanges & ranges, size_t tuple_size) const
 {
-    auto [begin, end] = lexCornerSearch(ordered_set, ordered_set, ranges, tuple_size, size());
+    auto [begin, end] = SetIndexDetail::lexCornerSearch(ordered_set, ordered_set, ranges, tuple_size, size());
 
     if (begin > end)
     {
@@ -897,7 +897,7 @@ BoolMask MergeTreeSetIndex::finishCheckInRange(const FieldValueRanges & ranges, 
     bool can_be_true = begin < end;
 
     /// A special case of 1-element KeyRange. It's useful for partition pruning.
-    if (isAtMostOneElementRange(ranges, tuple_size) && has_all_keys)
+    if (SetIndexDetail::isAtMostOneElementRange(ranges, tuple_size) && has_all_keys)
     {
         /// Here we know that there is at most one element in range.
         /// The main difference with the normal case is that we can definitely say that
@@ -1003,7 +1003,7 @@ bool MergeTreeSetIndex::hasMonotonicFunctionsChain() const
     return false;
 }
 
-void MergeTreeSetIndex::FieldValue::update(const Field & x)
+void SetIndexDetail::FieldValue::update(const Field & x)
 {
     if (x.isNegativeInfinity() || x.isPositiveInfinity())
         value = x;
