@@ -112,3 +112,96 @@ TEST(MergeTreeSetIndex, checkInRangeTuple)
     ranges = {Range(2), Range("a", true, "z", true)};
     ASSERT_EQ(set->checkInRange(ranges, types).can_be_true, false) << "Range(2, true, 3, true), Range('c', true, 'z', true)";
 }
+
+/// The sparse overload takes a map from key column to position in the given ranges, where -1 (or an
+/// index past the end of the map) means that column is not tracked and must be treated as
+/// unconstrained. It had no coverage; these pin that behaviour.
+TEST(MergeTreeSetIndex, checkInRangeSparseTuple)
+{
+    DataTypes types = {std::make_shared<const DataTypeUInt64>(), std::make_shared<const DataTypeString>()};
+
+    Columns columns;
+    {
+        auto values = {1, 1, 3, 3, 3, 10};
+        auto mut = types[0]->createColumn();
+        for (const auto & val : values)
+            mut->insert(val);
+        columns.push_back(std::move(mut));
+    }
+    {
+        auto values = {"a", "b", "a", "a", "b", "c"};
+        auto mut = types[1]->createColumn();
+        for (const auto & val : values)
+            mut->insert(val);
+        columns.push_back(std::move(mut));
+    }
+
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> mapping = {{0, 0, {}}, {1, 1, {}}};
+    auto set = std::make_unique<MergeTreeSetIndex>(columns, std::move(mapping));
+
+    /// Both columns tracked: must agree with the dense overload.
+    {
+        std::vector<int> pos = {0, 1};
+        Ranges ranges = {Range(1), Range("a", true, "c", true)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, types).can_be_true, true) << "tracked: (1), ('a','c')";
+
+        ranges = {Range(2), Range("a", true, "c", true)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, types).can_be_true, false) << "tracked: (2), ('a','c')";
+    }
+
+    /// Second column untracked: unconstrained, so only the first column discriminates.
+    {
+        std::vector<int> pos = {0, -1};
+        DataTypes sparse_types = {types[0]};
+
+        Ranges ranges = {Range(1)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, sparse_types).can_be_true, true) << "untracked: (1), *";
+
+        ranges = {Range(2)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, sparse_types).can_be_true, false) << "untracked: (2), *";
+
+        ranges = {Range(3)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, sparse_types).can_be_true, true) << "untracked: (3), *";
+
+        ranges = {Range(11)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, sparse_types).can_be_true, false) << "untracked: (11), *";
+    }
+
+    /// A map shorter than the key: any column past its end is untracked too.
+    {
+        std::vector<int> pos = {0};
+        DataTypes sparse_types = {types[0]};
+
+        Ranges ranges = {Range(3)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, sparse_types).can_be_true, true) << "short map: (3)";
+
+        ranges = {Range(2)};
+        ASSERT_EQ(set->checkInRange(pos, ranges, sparse_types).can_be_true, false) << "short map: (2)";
+    }
+}
+
+TEST(MergeTreeSetIndex, checkInRangeSparseOne)
+{
+    DataTypes types = {std::make_shared<const DataTypeInt64>()};
+
+    auto mut = types[0]->createColumn();
+    mut->insert(1);
+    mut->insert(5);
+    mut->insert(7);
+    Columns columns = {std::move(mut)};
+
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> mapping = {{0, 0, {}}};
+    auto set = std::make_unique<MergeTreeSetIndex>(columns, std::move(mapping));
+
+    std::vector<int> pos = {0};
+    Ranges ranges = {Range(1, true, 4, true)};
+    ASSERT_EQ(set->checkInRange(pos, ranges, types).can_be_true, true) << "(1, 4)";
+
+    ranges = {Range(2, true, 4, true)};
+    ASSERT_EQ(set->checkInRange(pos, ranges, types).can_be_true, false) << "(2, 4)";
+
+    /// The only key column untracked: nothing constrains the set at all.
+    std::vector<int> none = {-1};
+    ranges = {Range(2, true, 4, true)};
+    ASSERT_EQ(set->checkInRange(none, ranges, types).can_be_true, true) << "untracked key column";
+}

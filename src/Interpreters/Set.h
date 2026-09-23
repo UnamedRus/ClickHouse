@@ -285,6 +285,26 @@ private:
 
     using FieldValueRanges = std::vector<FieldValueRange>;
 
+    static int compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row);
+
+    /// The two corner searches over lexicographically sorted entries. `begin_corners` and
+    /// `end_corners` are the column arrays each search compares against; for a set of points they
+    /// are the same array, which is why the caller passes it twice rather than the searches
+    /// assuming it.
+    static std::pair<size_t, size_t> lexCornerSearch(
+        const Columns & begin_corners,
+        const Columns & end_corners,
+        const FieldValueRanges & ranges,
+        size_t tuple_size,
+        size_t set_size);
+
+    static bool isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size);
+
+    /// Everything after the key ranges have been resolved: the binary searches and the
+    /// at-most-one-element shortcut. The two `checkInRange` overloads differ only in how they
+    /// resolve those ranges, so this is the whole of what they share.
+    BoolMask finishCheckInRange(const FieldValueRanges & ranges, size_t tuple_size) const;
+
     /// Buffer reused across checkInRange calls (which run once per mark during index analysis)
     /// to avoid per-call column allocations. For fixed-width key types it is a per-thread cache
     /// (invalidated by the next call on the same thread) whose retained size is small and bounded.
