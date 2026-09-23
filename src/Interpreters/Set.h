@@ -257,20 +257,20 @@ struct FieldValueRange
 
 using FieldValueRanges = std::vector<FieldValueRange>;
 
-static int compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row);
+int compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row);
 
 /// The two corner searches over lexicographically sorted entries. `begin_corners` and
 /// `end_corners` are the column arrays each search compares against; for a set of points they
 /// are the same array, which is why the caller passes it twice rather than the searches
 /// assuming it.
-static std::pair<size_t, size_t> lexCornerSearch(
+std::pair<size_t, size_t> lexCornerSearch(
     const Columns & begin_corners,
     const Columns & end_corners,
     const FieldValueRanges & ranges,
     size_t tuple_size,
     size_t set_size);
 
-static bool isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size);
+bool isAtMostOneElementRange(const FieldValueRanges & ranges, size_t tuple_size);
 
 }
 
@@ -366,13 +366,27 @@ public:
     /// only loses selectivity.
     BoolMask checkInRange(const Ranges & key_ranges, const DataTypes & data_types, bool single_point = false) const;
 
+    /// Sparse overload, mirroring `MergeTreeSetIndex`: `key_col_to_sparse_pos` maps a key column to
+    /// its position in the given ranges, or -1 when nothing is known about it, in which case it is
+    /// treated as unconstrained. This is the form `KeyCondition::checkInHyperrectangle` uses.
+    BoolMask checkInRange(
+        const std::vector<int> & key_col_to_sparse_pos,
+        const Ranges & sparse_key_ranges,
+        const DataTypes & sparse_data_types,
+        bool single_point = false) const;
+
     const std::vector<KeyTuplePositionMapping> & getIndexesMapping() const { return indexes_mapping; }
 
 private:
+    SetIndexDetail::FieldValueRanges makeValueRanges() const;
+    BoolMask finish(const SetIndexDetail::FieldValueRanges & ranges) const;
+
     Columns lower;
     Columns upper;
     std::vector<KeyTuplePositionMapping> indexes_mapping;
 };
+
+using MergeTreeKeyRangeSetPtr = std::shared_ptr<const MergeTreeKeyRangeSet>;
 
 namespace SetIndexDetail
 {
@@ -384,6 +398,17 @@ bool resolveKeyRanges(
     const std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> & indexes_mapping,
     const Ranges & key_ranges,
     const DataTypes & data_types,
+    bool single_point,
+    FieldValueRanges & ranges);
+
+/// As above, but for the sparse form, where a key column may be absent from the given ranges and is
+/// then unconstrained. The two differ in that one bails when a position cannot be located and the
+/// other carries on, which is why they are separate rather than one function with a flag.
+bool resolveSparseKeyRanges(
+    const std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> & indexes_mapping,
+    const std::vector<int> & key_col_to_sparse_pos,
+    const Ranges & sparse_key_ranges,
+    const DataTypes & sparse_data_types,
     bool single_point,
     FieldValueRanges & ranges);
 

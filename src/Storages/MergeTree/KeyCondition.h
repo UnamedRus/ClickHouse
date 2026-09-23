@@ -26,6 +26,8 @@ class ExpressionActions;
 using ExpressionActionsPtr = std::shared_ptr<ExpressionActions>;
 struct ActionDAGNodes;
 class MergeTreeSetIndex;
+class MergeTreeKeyRangeSet;
+using MergeTreeKeyRangeSetPtr = std::shared_ptr<const MergeTreeKeyRangeSet>;
 struct KeyDescription;
 
 
@@ -317,6 +319,9 @@ public:
             FUNCTION_NOT_IN_RANGE,
             FUNCTION_IN_SET,
             FUNCTION_NOT_IN_SET,
+            /// A disjunction of key constraints held compactly, rather than expanded into an OR of
+            /// atoms. Carries a `MergeTreeKeyRangeSet`; see `key_range_set` below.
+            FUNCTION_IN_KEY_RANGE_SET,
             FUNCTION_IS_NULL,
             FUNCTION_IS_NOT_NULL,
             /// Special for space-filling curves.
@@ -381,6 +386,11 @@ public:
         /// For FUNCTION_IN_SET, FUNCTION_NOT_IN_SET
         using MergeTreeSetIndexPtr = std::shared_ptr<const MergeTreeSetIndex>;
         MergeTreeSetIndexPtr set_index;
+
+        /// For FUNCTION_IN_KEY_RANGE_SET. There is no negated form: a key range set only ever says
+        /// a granule may match, so negating it would claim a granule definitely does not - which it
+        /// cannot support.
+        MergeTreeKeyRangeSetPtr key_range_set;
 
         /// For FUNCTION_ARGS_IN_HYPERRECTANGLE
         Hyperrectangle space_filling_curve_args_hyperrectangle;

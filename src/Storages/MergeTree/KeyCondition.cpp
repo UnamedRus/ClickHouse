@@ -4867,6 +4867,7 @@ KeyCondition::Description KeyCondition::getDescription() const
             case RPNElement::FUNCTION_IS_NOT_NULL:
             case RPNElement::FUNCTION_IN_SET:
             case RPNElement::FUNCTION_NOT_IN_SET:
+            case RPNElement::FUNCTION_IN_KEY_RANGE_SET:
             case RPNElement::FUNCTION_ARGS_IN_HYPERRECTANGLE:
             case RPNElement::FUNCTION_POINT_IN_POLYGON:
             {
@@ -6070,6 +6071,7 @@ bool atomIsNullForNullArgument(KeyCondition::RPNElement::Function function)
         case KeyCondition::RPNElement::FUNCTION_NOT_IN_RANGE:
         case KeyCondition::RPNElement::FUNCTION_IN_SET:
         case KeyCondition::RPNElement::FUNCTION_NOT_IN_SET:
+        case KeyCondition::RPNElement::FUNCTION_IN_KEY_RANGE_SET:
         case KeyCondition::RPNElement::FUNCTION_ARGS_IN_HYPERRECTANGLE:
         case KeyCondition::RPNElement::FUNCTION_POINT_IN_POLYGON:
             return true;
@@ -7016,6 +7018,20 @@ BoolMask KeyCondition::checkInHyperrectangle(
             if (element.function == RPNElement::FUNCTION_NOT_IN_SET)
                 rpn_stack.back() = !rpn_stack.back();
         }
+        else if (element.function == RPNElement::FUNCTION_IN_KEY_RANGE_SET)
+        {
+            if (!element.key_range_set)
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "Key range set is not created yet");
+
+            /// Same approximation as for FUNCTION_IN_SET above: a range lookup instead of a
+            /// hyperrectangle lookup, which cannot produce false negatives because the range
+            /// contains the hyperrectangle.
+            rpn_stack.emplace_back(
+                element.key_range_set->checkInRange(key_col_to_sparse_pos, sparse_hyperrectangle, sparse_data_types, single_point));
+
+            if (element.relaxed)
+                rpn_stack.back().can_be_false = true;
+        }
         else if (element.function == RPNElement::FUNCTION_NOT)
         {
             chassert(!rpn_stack.empty());
@@ -7263,6 +7279,18 @@ String KeyCondition::RPNElement::toString(const std::vector<String> & key_names)
             buf << ")";
             return buf.str();
         }
+        case FUNCTION_IN_KEY_RANGE_SET:
+        {
+            buf << "(";
+            print_wrapped_columns();
+            buf << " in ";
+            if (!key_range_set)
+                buf << "unknown size key range set";
+            else
+                buf << key_range_set->size() << "-range key range set";
+            buf << ")";
+            return buf.str();
+        }
         case FUNCTION_IN_RANGE:
         case FUNCTION_NOT_IN_RANGE:
         {
@@ -7348,6 +7376,7 @@ bool KeyCondition::unknownOrAlwaysTrue(bool unknown_any) const
             case RPNElement::FUNCTION_IN_RANGE:
             case RPNElement::FUNCTION_IN_SET:
             case RPNElement::FUNCTION_NOT_IN_SET:
+            case RPNElement::FUNCTION_IN_KEY_RANGE_SET:
             case RPNElement::FUNCTION_ARGS_IN_HYPERRECTANGLE:
             case RPNElement::FUNCTION_POINT_IN_POLYGON:
             case RPNElement::FUNCTION_IS_NULL:
@@ -7406,6 +7435,7 @@ bool KeyCondition::alwaysFalse() const
             case RPNElement::FUNCTION_IN_RANGE:
             case RPNElement::FUNCTION_IN_SET:
             case RPNElement::FUNCTION_NOT_IN_SET:
+            case RPNElement::FUNCTION_IN_KEY_RANGE_SET:
             case RPNElement::FUNCTION_ARGS_IN_HYPERRECTANGLE:
             case RPNElement::FUNCTION_POINT_IN_POLYGON:
             case RPNElement::FUNCTION_IS_NULL:
@@ -7491,6 +7521,7 @@ std::vector<std::pair</*start*/ size_t, /*end*/ size_t>> KeyCondition::topLevelC
             case RPNElement::FUNCTION_NOT_IN_RANGE:
             case RPNElement::FUNCTION_IN_SET:
             case RPNElement::FUNCTION_NOT_IN_SET:
+            case RPNElement::FUNCTION_IN_KEY_RANGE_SET:
             case RPNElement::FUNCTION_IS_NULL:
             case RPNElement::FUNCTION_IS_NOT_NULL:
             case RPNElement::FUNCTION_ARGS_IN_HYPERRECTANGLE:

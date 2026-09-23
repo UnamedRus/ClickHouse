@@ -914,53 +914,13 @@ BoolMask MergeTreeSetIndex::finishCheckInRange(const FieldValueRanges & ranges, 
   */
 BoolMask MergeTreeSetIndex::checkInRange(const std::vector<int> & key_col_to_sparse_pos, const Ranges & sparse_key_ranges, const DataTypes & sparse_data_types, bool single_point) const
 {
-    auto get_sparse_info = [&](size_t key_column) -> std::pair<bool, size_t>
-    {
-        bool is_key_col_present = (key_column < key_col_to_sparse_pos.size() && key_col_to_sparse_pos[key_column] != -1);
-        const size_t sparse_pos = is_key_col_present ? static_cast<size_t>(key_col_to_sparse_pos[key_column]) : 0;
-        return {is_key_col_present, sparse_pos};
-    };
-
     size_t tuple_size = indexes_mapping.size();
 
     FieldValueRanges scratch;
     FieldValueRanges & ranges = getFieldValueRangesBuffer(scratch);
-    for (size_t i = 0; i < tuple_size; ++i)
-    {
-        size_t key_column = indexes_mapping[i].key_index;
-        auto [is_key_col_present, sparse_pos] = get_sparse_info(key_column);
-
-        FieldValueRange & range = ranges[i];
-
-        if (!is_key_col_present)
-        {
-            /// We have no range information for this key column.
-            /// Most likely earlier columns were high cardinality, so this column and later column marks were not loaded into memory
-            /// Treat it as completely unconstrained; since we do not have the type information,
-            /// we do not know whether to createWholeUniverse() or createWholeUniverseWithoutNull().
-            /// So, we choose the more relaxed option:
-            /// [-inf, +inf] instead of ( -inf, +inf ).
-            range.left.update(NEGATIVE_INFINITY);
-            range.right.update(POSITIVE_INFINITY);
-            range.left_included = true;
-            range.right_included = true;
-            continue;
-        }
-
-        std::optional<Range> new_range = KeyCondition::applyMonotonicFunctionsChainToRange(
-            sparse_key_ranges[sparse_pos],
-            indexes_mapping[i].functions,
-            sparse_data_types[sparse_pos],
-            single_point);
-
-        if (!new_range)
-            return {true, true};
-
-        range.left.update(new_range->left);
-        range.right.update(new_range->right);
-        range.left_included = new_range->left_included;
-        range.right_included = new_range->right_included;
-    }
+    if (!SetIndexDetail::resolveSparseKeyRanges(
+            indexes_mapping, key_col_to_sparse_pos, sparse_key_ranges, sparse_data_types, single_point, ranges))
+        return {true, true};
 
     return finishCheckInRange(ranges, tuple_size);
 }
@@ -1011,6 +971,56 @@ bool resolveKeyRanges(
     return true;
 }
 
+
+bool resolveSparseKeyRanges(
+    const std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> & indexes_mapping,
+    const std::vector<int> & key_col_to_sparse_pos,
+    const Ranges & sparse_key_ranges,
+    const DataTypes & sparse_data_types,
+    bool single_point,
+    FieldValueRanges & ranges)
+{
+    size_t tuple_size = indexes_mapping.size();
+    for (size_t i = 0; i < tuple_size; ++i)
+    {
+        const size_t key_column = indexes_mapping[i].key_index;
+        const bool is_key_col_present
+            = (key_column < key_col_to_sparse_pos.size() && key_col_to_sparse_pos[key_column] != -1);
+        const size_t sparse_pos = is_key_col_present ? static_cast<size_t>(key_col_to_sparse_pos[key_column]) : 0;
+
+        FieldValueRange & range = ranges[i];
+
+        if (!is_key_col_present)
+        {
+            /// We have no range information for this key column.
+            /// Most likely earlier columns were high cardinality, so this column and later column marks were not loaded into memory
+            /// Treat it as completely unconstrained; since we do not have the type information,
+            /// we do not know whether to createWholeUniverse() or createWholeUniverseWithoutNull().
+            /// So, we choose the more relaxed option:
+            /// [-inf, +inf] instead of ( -inf, +inf ).
+            range.left.update(NEGATIVE_INFINITY);
+            range.right.update(POSITIVE_INFINITY);
+            range.left_included = true;
+            range.right_included = true;
+            continue;
+        }
+
+        std::optional<Range> new_range = KeyCondition::applyMonotonicFunctionsChainToRange(
+            sparse_key_ranges[sparse_pos],
+            indexes_mapping[i].functions,
+            sparse_data_types[sparse_pos],
+            single_point);
+
+        if (!new_range)
+            return false;
+
+        range.left.update(new_range->left);
+        range.right.update(new_range->right);
+        range.left_included = new_range->left_included;
+        range.right_included = new_range->right_included;
+    }
+    return true;
+}
 }
 
 namespace
@@ -1061,17 +1071,41 @@ MergeTreeKeyRangeSet::MergeTreeKeyRangeSet(
         [](const KeyTuplePositionMapping & l, const KeyTuplePositionMapping & r) { return l.key_index < r.key_index; });
 }
 
+SetIndexDetail::FieldValueRanges MergeTreeKeyRangeSet::makeValueRanges() const
+{
+    SetIndexDetail::FieldValueRanges ranges;
+    ranges.reserve(indexes_mapping.size());
+    for (size_t i = 0; i < indexes_mapping.size(); ++i)
+        ranges.emplace_back(*lower[i]);
+    return ranges;
+}
+
+BoolMask MergeTreeKeyRangeSet::checkInRange(
+    const std::vector<int> & key_col_to_sparse_pos,
+    const Ranges & sparse_key_ranges,
+    const DataTypes & sparse_data_types,
+    bool single_point) const
+{
+    auto ranges = makeValueRanges();
+    if (!SetIndexDetail::resolveSparseKeyRanges(
+            indexes_mapping, key_col_to_sparse_pos, sparse_key_ranges, sparse_data_types, single_point, ranges))
+        return {true, true};
+
+    return finish(ranges);
+}
+
 BoolMask MergeTreeKeyRangeSet::checkInRange(const Ranges & key_ranges, const DataTypes & data_types, bool single_point) const
 {
-    size_t tuple_size = indexes_mapping.size();
-
-    SetIndexDetail::FieldValueRanges ranges;
-    ranges.reserve(tuple_size);
-    for (size_t i = 0; i < tuple_size; ++i)
-        ranges.emplace_back(*lower[i]);
-
+    auto ranges = makeValueRanges();
     if (!SetIndexDetail::resolveKeyRanges(indexes_mapping, key_ranges, data_types, single_point, ranges))
         return {true, true};
+
+    return finish(ranges);
+}
+
+BoolMask MergeTreeKeyRangeSet::finish(const SetIndexDetail::FieldValueRanges & ranges) const
+{
+    const size_t tuple_size = indexes_mapping.size();
 
     /// An entry is below the granule's range when its *upper* corner is, and above it when its
     /// *lower* corner is - so the two searches consult opposite corners. For a set of points, where
