@@ -205,3 +205,105 @@ TEST(MergeTreeSetIndex, checkInRangeSparseOne)
     ranges = {Range(2, true, 4, true)};
     ASSERT_EQ(set->checkInRange(none, ranges, types).can_be_true, true) << "untracked key column";
 }
+
+namespace
+{
+
+/// Builds a key range set from closed intervals given per tuple position.
+MergeTreeKeyRangeSet makeRangeSet(const DataTypes & types, const std::vector<std::vector<Field>> & lowers,
+                                  const std::vector<std::vector<Field>> & uppers)
+{
+    Columns lower;
+    Columns upper;
+    for (size_t i = 0; i < types.size(); ++i)
+    {
+        auto lo = types[i]->createColumn();
+        auto hi = types[i]->createColumn();
+        for (size_t j = 0; j < lowers[i].size(); ++j)
+        {
+            lo->insert(lowers[i][j]);
+            hi->insert(uppers[i][j]);
+        }
+        lower.push_back(std::move(lo));
+        upper.push_back(std::move(hi));
+    }
+
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> mapping;
+    for (size_t i = 0; i < types.size(); ++i)
+        mapping.push_back({i, i, {}});
+    return MergeTreeKeyRangeSet(std::move(lower), std::move(upper), std::move(mapping));
+}
+
+}
+
+TEST(MergeTreeKeyRangeSet, singleColumn)
+{
+    DataTypes types = {std::make_shared<const DataTypeInt64>()};
+    /// Two disjoint windows: [1, 3] and [7, 9].
+    auto set = makeRangeSet(types, {{Field(1), Field(7)}}, {{Field(3), Field(9)}});
+
+    Ranges ranges = {Range(2, true, 2, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "inside the first window";
+
+    ranges = {Range(5, true, 6, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, false) << "in the gap between windows";
+
+    ranges = {Range(-5, true, 0, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, false) << "below every window";
+
+    ranges = {Range(10, true, 20, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, false) << "above every window";
+
+    ranges = {Range(3, true, 7, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "touching both windows";
+
+    ranges = {Range(1, true, 1, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "on a window's lower edge";
+
+    ranges = {Range(9, true, 9, true)};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "on a window's upper edge";
+
+    ranges = {Range::createWholeUniverseWithoutNull()};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "unbounded";
+
+    /// An entry can never prove a granule matches entirely.
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_false, true) << "can_be_false is always true";
+}
+
+/// The shape this exists for: equality on the leading key column, a range on the next. Each entry
+/// is then an interval of key tuples, so the answer is exact rather than an over-approximation.
+TEST(MergeTreeKeyRangeSet, prefixEqualityWithRange)
+{
+    DataTypes types = {std::make_shared<const DataTypeUInt64>(), std::make_shared<const DataTypeString>()};
+
+    /// (k1 = 1 AND k2 BETWEEN 'a' AND 'c') OR (k1 = 3 AND k2 BETWEEN 'x' AND 'z')
+    auto set = makeRangeSet(
+        types,
+        {{Field(UInt64(1)), Field(UInt64(3))}, {Field("a"), Field("x")}},
+        {{Field(UInt64(1)), Field(UInt64(3))}, {Field("c"), Field("z")}});
+
+    Ranges ranges = {Range(UInt64(1)), Range("b")};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "(1, 'b') is in the first window";
+
+    ranges = {Range(UInt64(1)), Range("z")};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, false) << "(1, 'z') is past the first window";
+
+    ranges = {Range(UInt64(3)), Range("y")};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "(3, 'y') is in the second window";
+
+    ranges = {Range(UInt64(3)), Range("b")};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, false) << "(3, 'b') is before the second window";
+
+    ranges = {Range(UInt64(2)), Range::createWholeUniverseWithoutNull()};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, false) << "k1 = 2 lies between the windows";
+
+    /// A granule spanning both windows.
+    ranges = {Range(UInt64(1), true, UInt64(3), true), Range::createWholeUniverseWithoutNull()};
+    ASSERT_EQ(set.checkInRange(ranges, types).can_be_true, true) << "granule covering both windows";
+}
+
+/// The constructor rejects an inverted entry, and entries whose corner arrays are not
+/// non-decreasing, because the binary searches would then return wrong answers rather than slow
+/// ones. That check raises LOGICAL_ERROR, which `Exception.cpp` turns into an assertion failure in
+/// debug and sanitizer builds and into a thrown exception elsewhere - so it aborts in exactly the
+/// configurations this test runs in, and there is no portable way to assert on it from here.

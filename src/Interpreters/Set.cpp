@@ -971,10 +971,27 @@ BoolMask MergeTreeSetIndex::checkInRange(const Ranges & key_ranges, const DataTy
 
     FieldValueRanges scratch;
     FieldValueRanges & ranges = getFieldValueRangesBuffer(scratch);
+    if (!SetIndexDetail::resolveKeyRanges(indexes_mapping, key_ranges, data_types, single_point, ranges))
+        return {true, true};
+
+    return finishCheckInRange(ranges, tuple_size);
+}
+
+namespace SetIndexDetail
+{
+
+bool resolveKeyRanges(
+    const std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> & indexes_mapping,
+    const Ranges & key_ranges,
+    const DataTypes & data_types,
+    bool single_point,
+    FieldValueRanges & ranges)
+{
+    size_t tuple_size = indexes_mapping.size();
     for (size_t i = 0; i < tuple_size; ++i)
     {
         if (indexes_mapping[i].key_index >= key_ranges.size())
-            return {true, true};
+            return false;
 
         std::optional<Range> new_range = KeyCondition::applyMonotonicFunctionsChainToRange(
             key_ranges[indexes_mapping[i].key_index],
@@ -983,7 +1000,7 @@ BoolMask MergeTreeSetIndex::checkInRange(const Ranges & key_ranges, const DataTy
             single_point);
 
         if (!new_range)
-            return {true, true};
+            return false;
 
         FieldValueRange & range = ranges[i];
         range.left.update(new_range->left);
@@ -991,8 +1008,80 @@ BoolMask MergeTreeSetIndex::checkInRange(const Ranges & key_ranges, const DataTy
         range.left_included = new_range->left_included;
         range.right_included = new_range->right_included;
     }
+    return true;
+}
 
-    return finishCheckInRange(ranges, tuple_size);
+}
+
+namespace
+{
+
+/// Lexicographic comparison of entry `row_a` of one corner array against entry `row_b` of another.
+int compareCorners(const Columns & a, size_t row_a, const Columns & b, size_t row_b)
+{
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (int cmp = a[i]->compareAt(row_a, row_b, *b[i], 1))
+            return cmp;
+    }
+    return 0;
+}
+
+}
+
+MergeTreeKeyRangeSet::MergeTreeKeyRangeSet(
+    Columns lower_, Columns upper_, std::vector<KeyTuplePositionMapping> && indexes_mapping_)
+    : lower(std::move(lower_)), upper(std::move(upper_)), indexes_mapping(std::move(indexes_mapping_))
+{
+    if (lower.empty() || lower.size() != upper.size() || lower.size() != indexes_mapping.size())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "MergeTreeKeyRangeSet needs one lower and one upper column per tuple position, got {}, {} and {}",
+            lower.size(), upper.size(), indexes_mapping.size());
+
+    const size_t rows = lower[0]->size();
+    for (size_t i = 0; i < lower.size(); ++i)
+    {
+        if (lower[i]->size() != rows || upper[i]->size() != rows)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet columns have different sizes");
+    }
+
+    /// The binary searches in `checkInRange` need both corner arrays non-decreasing, and every
+    /// entry to be a non-empty interval. Overlapping entries would break the first silently.
+    for (size_t row = 0; row < rows; ++row)
+    {
+        if (compareCorners(lower, row, upper, row) > 0)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet entry {} has its lower corner above its upper", row);
+
+        if (row > 0
+            && (compareCorners(lower, row - 1, lower, row) > 0 || compareCorners(upper, row - 1, upper, row) > 0))
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet entries are not sorted and disjoint at {}", row);
+    }
+
+    std::sort(indexes_mapping.begin(), indexes_mapping.end(),
+        [](const KeyTuplePositionMapping & l, const KeyTuplePositionMapping & r) { return l.key_index < r.key_index; });
+}
+
+BoolMask MergeTreeKeyRangeSet::checkInRange(const Ranges & key_ranges, const DataTypes & data_types, bool single_point) const
+{
+    size_t tuple_size = indexes_mapping.size();
+
+    SetIndexDetail::FieldValueRanges ranges;
+    ranges.reserve(tuple_size);
+    for (size_t i = 0; i < tuple_size; ++i)
+        ranges.emplace_back(*lower[i]);
+
+    if (!SetIndexDetail::resolveKeyRanges(indexes_mapping, key_ranges, data_types, single_point, ranges))
+        return {true, true};
+
+    /// An entry is below the granule's range when its *upper* corner is, and above it when its
+    /// *lower* corner is - so the two searches consult opposite corners. For a set of points, where
+    /// the corners coincide, this is exactly what `MergeTreeSetIndex` does.
+    auto [begin, end] = SetIndexDetail::lexCornerSearch(upper, lower, ranges, tuple_size, size());
+
+    if (begin > end)
+        return {true, true};
+
+    return {begin < end, true};
 }
 
 bool MergeTreeSetIndex::hasMonotonicFunctionsChain() const

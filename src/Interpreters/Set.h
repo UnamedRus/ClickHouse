@@ -333,4 +333,60 @@ private:
     bool cache_ranges = false;
 };
 
+/** A disjunction of key constraints: entry `j` constrains key column `i` to the closed interval
+  * [lower[i][j], upper[i][j]]. An equality is lower == upper.
+  *
+  * Where `MergeTreeSetIndex` answers "is any stored key tuple inside this granule's key range",
+  * this answers "does any stored interval of key tuples meet it". It exists because a disjunction
+  * of `n` key constraints has no compact form today: `KeyCondition` can express one through
+  * `Range`, but `n` of them expand into an OR of RPN atoms.
+  *
+  * Both corner arrays must be non-decreasing, which is what the binary searches in `checkInRange`
+  * require; sorting entries by their lower corner and keeping them disjoint achieves it. A caller
+  * that supplies overlapping entries gets wrong answers rather than slow ones, so the constructor
+  * checks.
+  *
+  * Intervals are closed. That covers what this exists for - equality on a sort-key prefix and a
+  * range on the next column - and avoids carrying per-entry, per-column inclusion flags.
+  */
+class MergeTreeKeyRangeSet
+{
+public:
+    using KeyTuplePositionMapping = MergeTreeSetIndex::KeyTuplePositionMapping;
+
+    MergeTreeKeyRangeSet(Columns lower_, Columns upper_, std::vector<KeyTuplePositionMapping> && indexes_mapping_);
+
+    size_t size() const { return lower.at(0)->size(); }
+
+    /// `can_be_false` is always true: an entry can say a granule may match, never that all of it does.
+    ///
+    /// Exact when every entry is an interval of key tuples, which is what equality on a sort-key
+    /// prefix produces. For an entry that constrains a non-final column by a range, the test uses
+    /// the entry's lexicographic span, which contains the entry - so the answer stays sound and
+    /// only loses selectivity.
+    BoolMask checkInRange(const Ranges & key_ranges, const DataTypes & data_types, bool single_point = false) const;
+
+    const std::vector<KeyTuplePositionMapping> & getIndexesMapping() const { return indexes_mapping; }
+
+private:
+    Columns lower;
+    Columns upper;
+    std::vector<KeyTuplePositionMapping> indexes_mapping;
+};
+
+namespace SetIndexDetail
+{
+
+/// Resolve a granule's key ranges into one value range per tuple position, applying that position's
+/// monotonic function chain. False means a position could not be resolved and the caller must
+/// answer `{true, true}`.
+bool resolveKeyRanges(
+    const std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> & indexes_mapping,
+    const Ranges & key_ranges,
+    const DataTypes & data_types,
+    bool single_point,
+    FieldValueRanges & ranges);
+
+}
+
 }
