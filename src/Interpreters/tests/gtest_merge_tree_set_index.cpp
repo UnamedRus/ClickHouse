@@ -1,5 +1,6 @@
 #include <Interpreters/Set.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <Storages/MergeTree/KeyCondition.h>
 
@@ -307,3 +308,238 @@ TEST(MergeTreeKeyRangeSet, prefixEqualityWithRange)
 /// ones. That check raises LOGICAL_ERROR, which `Exception.cpp` turns into an assertion failure in
 /// debug and sanitizer builds and into a thrown exception elsewhere - so it aborts in exactly the
 /// configurations this test runs in, and there is no portable way to assert on it from here.
+
+namespace
+{
+
+Columns makeColumns(const DataTypes & types, const std::vector<std::vector<Field>> & values)
+{
+    Columns columns;
+    for (size_t i = 0; i < types.size(); ++i)
+    {
+        auto column = types[i]->createColumn();
+        for (const auto & value : values[i])
+            column->insert(value);
+        columns.push_back(std::move(column));
+    }
+    return columns;
+}
+
+/// Assembles corner columns for entries given as (prefix equalities..., lower, upper) per row,
+/// which is the shape the restricted case produces. `n_prefix` columns are shared by both corners.
+std::pair<Columns, Columns> makeCorners(const DataTypes & types, const std::vector<std::vector<Field>> & values, size_t n_prefix)
+{
+    auto columns = makeColumns(types, values);
+    Columns lower(columns.begin(), columns.begin() + n_prefix);
+    lower.push_back(columns[n_prefix]);
+    Columns upper(columns.begin(), columns.begin() + n_prefix);
+    upper.push_back(columns[n_prefix + 1]);
+    return {lower, upper};
+}
+
+std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> identityMapping(size_t tuple_size)
+{
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> mapping;
+    for (size_t i = 0; i < tuple_size; ++i)
+        mapping.push_back({i, i, {}});
+    return mapping;
+}
+
+}
+
+/// `buildKeyRangeSet` has to establish what `MergeTreeKeyRangeSet` requires and does not check for
+/// itself: ordered, non-overlapping entries.
+TEST(BuildKeyRangeSet, coalescing)
+{
+    DataTypes bound_types = {std::make_shared<const DataTypeInt64>(), std::make_shared<const DataTypeInt64>()};
+
+    /// Overlapping ranges become one.
+    {
+        auto [lower, upper] = makeCorners(bound_types, {{Field(1), Field(3)}, {Field(5), Field(8)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.outcome, KeyRangeSetOutcome::Built);
+        ASSERT_EQ(result.set->size(), 1u) << "[1,5] and [3,8] overlap";
+    }
+
+    /// Touching ranges become one.
+    {
+        auto [lower, upper] = makeCorners(bound_types, {{Field(1), Field(5)}, {Field(5), Field(9)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.set->size(), 1u) << "[1,5] and [5,9] touch";
+    }
+
+    /// A contained range is absorbed.
+    {
+        auto [lower, upper] = makeCorners(bound_types, {{Field(1), Field(3)}, {Field(10), Field(4)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.set->size(), 1u) << "[3,4] lies inside [1,10]";
+        DataTypes key_types = {bound_types[0]};
+        Ranges ranges = {Range(7, true, 7, true)};
+        ASSERT_EQ(result.set->checkInRange(ranges, key_types).can_be_true, true) << "the merged entry still covers 7";
+    }
+
+    /// Disjoint ranges stay apart, whatever order they arrive in.
+    {
+        auto [lower, upper] = makeCorners(bound_types, {{Field(7), Field(1)}, {Field(9), Field(3)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.set->size(), 2u) << "[7,9] and [1,3] are disjoint and given out of order";
+
+        DataTypes key_types = {bound_types[0]};
+        Ranges ranges = {Range(5, true, 5, true)};
+        ASSERT_EQ(result.set->checkInRange(ranges, key_types).can_be_true, false) << "5 is in the gap";
+    }
+
+    /// A row whose bounds cross matches nothing and is dropped rather than rejected.
+    {
+        auto [lower, upper] = makeCorners(bound_types, {{Field(1), Field(9)}, {Field(3), Field(2)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.set->size(), 1u) << "the row with lower above upper is dropped";
+    }
+
+    /// Nothing survives. This says the key is constrained to nothing, which is the opposite of
+    /// there being no constraint - a caller must be able to tell the two apart.
+    {
+        auto [lower, upper] = makeCorners(bound_types, {{Field(9)}, {Field(1)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.outcome, KeyRangeSetOutcome::MatchesNothing);
+        ASSERT_EQ(result.set, nullptr);
+    }
+}
+
+TEST(BuildKeyRangeSet, prefixIsRespected)
+{
+    DataTypes types = {
+        std::make_shared<const DataTypeUInt64>(),
+        std::make_shared<const DataTypeString>(),
+        std::make_shared<const DataTypeString>()};
+
+    /// (1, [a,c]), (1, [b,d]) overlap and merge; (2, [a,c]) is a different prefix and does not.
+    const std::vector<std::vector<Field>> elements_values = {
+        {Field(UInt64(1)), Field(UInt64(1)), Field(UInt64(2))},
+        {Field("a"), Field("b"), Field("a")},
+        {Field("c"), Field("d"), Field("c")}};
+
+    auto [lower, upper] = makeCorners(types, elements_values, 1);
+    auto result = buildKeyRangeSet(lower, upper, identityMapping(2));
+    ASSERT_EQ(result.outcome, KeyRangeSetOutcome::Built);
+    ASSERT_EQ(result.set->size(), 2u) << "the two entries under prefix 1 merge, prefix 2 stays separate";
+
+    DataTypes key_types = {types[0], types[1]};
+
+    Ranges ranges = {Range(UInt64(1)), Range("d")};
+    ASSERT_EQ(result.set->checkInRange(ranges, key_types).can_be_true, true) << "(1, 'd') is inside the merged entry";
+
+    ranges = {Range(UInt64(2)), Range("d")};
+    ASSERT_EQ(result.set->checkInRange(ranges, key_types).can_be_true, false) << "(2, 'd') is past the prefix-2 entry";
+}
+
+/// A NULL bound makes the comparison NULL, not true, so the row satisfies nothing.
+TEST(BuildKeyRangeSet, nullBoundsAreDropped)
+{
+    DataTypes nullable_types = {
+        std::make_shared<const DataTypeNullable>(std::make_shared<const DataTypeInt64>()),
+        std::make_shared<const DataTypeNullable>(std::make_shared<const DataTypeInt64>())};
+
+    {
+        auto [lower, upper] = makeCorners(nullable_types, {{Field(1), Field()}, {Field(3), Field(9)}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.outcome, KeyRangeSetOutcome::Built);
+        ASSERT_EQ(result.set->size(), 1u) << "the row with a NULL lower bound is dropped";
+    }
+
+    {
+        auto [lower, upper] = makeCorners(nullable_types, {{Field(1)}, {Field()}}, 0);
+        auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+        ASSERT_EQ(result.outcome, KeyRangeSetOutcome::MatchesNothing) << "only row had a NULL upper bound";
+    }
+}
+
+/// `contains` answers the row-level question exactly, where `checkInRange` answers the
+/// granule-level one conservatively.
+TEST(MergeTreeKeyRangeSet, containsRow)
+{
+    DataTypes bound_types = {std::make_shared<const DataTypeInt64>(), std::make_shared<const DataTypeInt64>()};
+    /// [1, 3] and [7, 9]
+    auto [lower, upper] = makeCorners(bound_types, {{Field(1), Field(7)}, {Field(3), Field(9)}}, 0);
+    auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+    ASSERT_EQ(result.outcome, KeyRangeSetOutcome::Built);
+
+    DataTypes key_types = {bound_types[0]};
+    auto probe = makeColumns(key_types, {{Field(0), Field(1), Field(2), Field(3), Field(5), Field(7), Field(9), Field(10)}});
+    const std::vector<bool> expected = {false, true, true, true, false, true, true, false};
+
+    for (size_t row = 0; row < expected.size(); ++row)
+        ASSERT_EQ(result.set->contains(probe, row), expected[row]) << "row " << row;
+}
+
+TEST(MergeTreeKeyRangeSet, containsRowWithPrefix)
+{
+    DataTypes types = {
+        std::make_shared<const DataTypeUInt64>(),
+        std::make_shared<const DataTypeString>(),
+        std::make_shared<const DataTypeString>()};
+
+    /// (1, [a,c]) and (3, [x,z])
+    auto [lower, upper] = makeCorners(types, {
+        {Field(UInt64(1)), Field(UInt64(3))},
+        {Field("a"), Field("x")},
+        {Field("c"), Field("z")}}, 1);
+    auto result = buildKeyRangeSet(lower, upper, identityMapping(2));
+    ASSERT_EQ(result.outcome, KeyRangeSetOutcome::Built);
+
+    DataTypes key_types = {types[0], types[1]};
+    auto probe = makeColumns(key_types, {
+        {Field(UInt64(1)), Field(UInt64(1)), Field(UInt64(2)), Field(UInt64(3)), Field(UInt64(3))},
+        {Field("b"),       Field("z"),       Field("b"),       Field("y"),       Field("a")}});
+    const std::vector<bool> expected = {true, false, false, true, false};
+
+    for (size_t row = 0; row < expected.size(); ++row)
+        ASSERT_EQ(result.set->contains(probe, row), expected[row]) << "row " << row;
+}
+
+/// Two ranged columns. Entries like these overlap as lexicographic spans, which the earlier
+/// restricted form rejected outright; the running maximum over upper corners is what admits them.
+TEST(MergeTreeKeyRangeSet, multipleRangedColumns)
+{
+    DataTypes key_types = {std::make_shared<const DataTypeInt64>(), std::make_shared<const DataTypeInt64>()};
+
+    /// A: k1 in [1,10], k2 in [5,6]      B: k1 in [2,3], k2 in [1,2]
+    Columns lower = makeColumns(key_types, {{Field(1), Field(2)}, {Field(5), Field(1)}});
+    Columns upper = makeColumns(key_types, {{Field(10), Field(3)}, {Field(6), Field(2)}});
+
+    auto result = buildKeyRangeSet(lower, upper, identityMapping(2));
+    ASSERT_EQ(result.outcome, KeyRangeSetOutcome::Built);
+    ASSERT_EQ(result.set->size(), 2u) << "boxes are not merged - their union is not a box";
+    ASSERT_FALSE(result.set->isDisjoint()) << "A and B overlap as lexicographic spans";
+
+    auto mayMatch = [&](Int64 k1, Int64 k2)
+    {
+        Ranges ranges = {Range(k1), Range(k2)};
+        return result.set->checkInRange(ranges, key_types).can_be_true;
+    };
+
+    ASSERT_TRUE(mayMatch(2, 1)) << "(2,1) is in B";
+    ASSERT_TRUE(mayMatch(2, 5)) << "(2,5) is in A";
+    ASSERT_FALSE(mayMatch(0, 0)) << "(0,0) is below every entry";
+    ASSERT_FALSE(mayMatch(11, 0)) << "(11,0) is above every entry";
+
+    /// Documented over-approximation: an entry is tested through its lexicographic span, which
+    /// contains the box, so a point in the span but outside every box answers "may match".
+    ASSERT_TRUE(mayMatch(2, 4)) << "(2,4) is in neither box but lies in A's span";
+}
+
+/// Equality on the leading column keeps entries disjoint, which is what `contains` needs.
+TEST(MergeTreeKeyRangeSet, disjointnessIsRecorded)
+{
+    DataTypes bound_types = {std::make_shared<const DataTypeInt64>(), std::make_shared<const DataTypeInt64>()};
+
+    auto [lower, upper] = makeCorners(bound_types, {{Field(1), Field(7)}, {Field(3), Field(9)}}, 0);
+    auto result = buildKeyRangeSet(lower, upper, identityMapping(1));
+    ASSERT_TRUE(result.set->isDisjoint()) << "[1,3] and [7,9] do not overlap";
+
+    /// Overlapping single-column entries are merged, so the result is disjoint again.
+    auto [lo2, hi2] = makeCorners(bound_types, {{Field(1), Field(2)}, {Field(5), Field(9)}}, 0);
+    auto merged = buildKeyRangeSet(lo2, hi2, identityMapping(1));
+    ASSERT_EQ(merged.set->size(), 1u);
+    ASSERT_TRUE(merged.set->isDisjoint());
+}

@@ -797,6 +797,50 @@ int SetIndexDetail::compareValue(const IColumn & lhs, const FieldValue & rhs, si
     return lhs.compareAt(row, 0, *rhs.column, 1);
 }
 
+bool SetIndexDetail::isBelowLeftCorner(
+    const Columns & corners, size_t row, const FieldValueRanges & ranges, size_t tuple_size)
+{
+    for (size_t i = 0; i < tuple_size; ++i)
+    {
+        int cmp = compareValue(*corners[i], ranges[i].left, row);
+
+        if (cmp > 0)
+            return false;
+        /// Note: if some range has left_included == false then the left ends of all
+        /// subsequent ranges' don't matter. (Symmetrically for right.)
+        /// It's the only way to make sense of the notion of a range of tuples where the
+        /// included/excluded flags are given per element.
+        if (cmp < 0 || (cmp == 0 && !ranges[i].left_included))
+            return true;
+    }
+    return false;
+}
+
+bool SetIndexDetail::isAboveRightCorner(
+    const Columns & corners, size_t row, const FieldValueRanges & ranges, size_t tuple_size)
+{
+    for (size_t i = 0; i < tuple_size; ++i)
+    {
+        int cmp = compareValue(*corners[i], ranges[i].right, row);
+
+        if (cmp > 0 || (cmp == 0 && !ranges[i].right_included))
+            return true;
+        if (cmp < 0)
+            return false;
+    }
+    return false;
+}
+
+size_t SetIndexDetail::lexUpperBound(
+    const Columns & corners, const FieldValueRanges & ranges, size_t tuple_size, size_t set_size)
+{
+    auto indices = collections::range(0, set_size);
+    return std::partition_point(indices.begin(), indices.end(), [&](size_t row)
+        {
+            return !isAboveRightCorner(corners, row, ranges, tuple_size);
+        }) - indices.begin();
+}
+
 std::pair<size_t, size_t> SetIndexDetail::lexCornerSearch(
     const Columns & begin_corners,
     const Columns & end_corners,
@@ -821,36 +865,10 @@ std::pair<size_t, size_t> SetIndexDetail::lexCornerSearch(
     auto indices = collections::range(0, set_size);
     size_t begin = std::partition_point(indices.begin(), indices.end(), [&](size_t row)
         {
-            /// Return true if the entry at `row` is below the key range.
-            for (size_t i = 0; i < tuple_size; ++i)
-            {
-                int cmp = compareValue(*begin_corners[i], ranges[i].left, row);
-
-                if (cmp > 0)
-                    return false;
-                /// Note: if some range has left_included == false then the left ends of all
-                /// subsequent ranges' don't matter. (Symmetrically for right.)
-                /// It's the only way to make sense of the notion of a range of tuples where the
-                /// included/excluded flags are given per element.
-                if (cmp < 0 || (cmp == 0 && !ranges[i].left_included))
-                    return true;
-            }
-            return false;
+            return isBelowLeftCorner(begin_corners, row, ranges, tuple_size);
         }) - indices.begin();
-    size_t end = std::partition_point(indices.begin(), indices.end(), [&](size_t row)
-        {
-            /// Return false if the entry at `row` is above the key range.
-            for (size_t i = 0; i < tuple_size; ++i)
-            {
-                int cmp = compareValue(*end_corners[i], ranges[i].right, row);
 
-                if (cmp > 0 || (cmp == 0 && !ranges[i].right_included))
-                    return false;
-                if (cmp < 0)
-                    return true;
-            }
-            return true;
-        }) - indices.begin();
+    size_t end = lexUpperBound(end_corners, ranges, tuple_size, set_size);
 
     return {begin, end};
 }
@@ -1055,17 +1073,48 @@ MergeTreeKeyRangeSet::MergeTreeKeyRangeSet(
             throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet columns have different sizes");
     }
 
-    /// The binary searches in `checkInRange` need both corner arrays non-decreasing, and every
-    /// entry to be a non-empty interval. Overlapping entries would break the first silently.
+    /// Entries must be ordered by lower corner and non-empty. Upper corners need not be ordered:
+    /// the running maximum below is what lets the granule test work without that.
     for (size_t row = 0; row < rows; ++row)
     {
         if (compareCorners(lower, row, upper, row) > 0)
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet entry {} has its lower corner above its upper", row);
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "MergeTreeKeyRangeSet entry {} has its lower corner above its upper", row);
 
-        if (row > 0
-            && (compareCorners(lower, row - 1, lower, row) > 0 || compareCorners(upper, row - 1, upper, row) > 0))
-            throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet entries are not sorted and disjoint at {}", row);
+        if (row > 0 && compareCorners(lower, row - 1, lower, row) > 0)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "MergeTreeKeyRangeSet entries are not ordered at {}", row);
     }
+
+    /// Disjoint when each entry starts strictly after the previous one ends. Ordered lower corners
+    /// make the consecutive check sufficient: if every entry clears its predecessor, it clears all
+    /// of them.
+    disjoint = true;
+    for (size_t row = 1; row < rows && disjoint; ++row)
+    {
+        if (compareCorners(lower, row, upper, row - 1) <= 0)
+            disjoint = false;
+    }
+
+    MutableColumns running_max;
+    running_max.reserve(upper.size());
+    for (const auto & column : upper)
+        running_max.push_back(column->cloneEmpty());
+
+    for (size_t row = 0; row < rows; ++row)
+    {
+        Columns so_far;
+        so_far.reserve(running_max.size());
+        for (const auto & column : running_max)
+            so_far.push_back(column->getPtr());
+
+        const bool take_current = (row == 0) || compareCorners(upper, row, so_far, row - 1) >= 0;
+        for (size_t i = 0; i < running_max.size(); ++i)
+            running_max[i]->insertFrom(take_current ? *upper[i] : *so_far[i], take_current ? row : row - 1);
+    }
+
+    prefix_max_upper.reserve(running_max.size());
+    for (auto & column : running_max)
+        prefix_max_upper.push_back(std::move(column));
 
     std::sort(indexes_mapping.begin(), indexes_mapping.end(),
         [](const KeyTuplePositionMapping & l, const KeyTuplePositionMapping & r) { return l.key_index < r.key_index; });
@@ -1107,15 +1156,177 @@ BoolMask MergeTreeKeyRangeSet::finish(const SetIndexDetail::FieldValueRanges & r
 {
     const size_t tuple_size = indexes_mapping.size();
 
-    /// An entry is below the granule's range when its *upper* corner is, and above it when its
-    /// *lower* corner is - so the two searches consult opposite corners. For a set of points, where
-    /// the corners coincide, this is exactly what `MergeTreeSetIndex` does.
-    auto [begin, end] = SetIndexDetail::lexCornerSearch(upper, lower, ranges, tuple_size, size());
+    /// Entries that can meet the range are those starting at or before its right corner - a prefix,
+    /// because lower corners are ordered. Among them, one reaches the range's left corner exactly
+    /// when the running maximum of their upper corners does.
+    const size_t candidates = SetIndexDetail::lexUpperBound(lower, ranges, tuple_size, size());
 
-    if (begin > end)
-        return {true, true};
+    if (candidates == 0)
+        return {false, true};
 
-    return {begin < end, true};
+    const bool any_reaches_left
+        = !SetIndexDetail::isBelowLeftCorner(prefix_max_upper, candidates - 1, ranges, tuple_size);
+
+    return {any_reaches_left, true};
+}
+
+KeyRangeSetBuildResult buildKeyRangeSet(
+    const Columns & lower,
+    const Columns & upper,
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> indexes_mapping)
+{
+    const size_t tuple_size = indexes_mapping.size();
+    if (tuple_size == 0 || lower.size() != tuple_size || upper.size() != tuple_size)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "buildKeyRangeSet needs one lower and one upper column per key position, got {}, {} and {}",
+            lower.size(), upper.size(), tuple_size);
+
+    const size_t rows = lower[0]->size();
+
+    auto hasNullBound = [&](size_t row)
+    {
+        for (size_t i = 0; i < tuple_size; ++i)
+        {
+            if (lower[i]->isNullAt(row) || upper[i]->isNullAt(row))
+                return true;
+        }
+        return false;
+    };
+
+    std::vector<size_t> order;
+    order.reserve(rows);
+    for (size_t row = 0; row < rows; ++row)
+    {
+        /// A NULL bound makes the comparison NULL rather than true, so the row satisfies nothing.
+        if (hasNullBound(row))
+            continue;
+        if (compareCorners(lower, row, upper, row) <= 0)
+            order.push_back(row);
+    }
+
+    if (order.empty())
+        return {KeyRangeSetOutcome::MatchesNothing, nullptr};
+
+    std::sort(order.begin(), order.end(), [&](size_t l, size_t r)
+    {
+        if (int cmp = compareCorners(lower, l, lower, r))
+            return cmp < 0;
+        return compareCorners(upper, l, upper, r) < 0;
+    });
+
+    /// An entry whose every column before the last is an equality is a contiguous interval of key
+    /// tuples. Only such entries may be merged: the union of two overlapping intervals is an
+    /// interval, while the union of two overlapping boxes is not a box, and replacing it by the
+    /// enclosing box would silently widen the set.
+    auto isInterval = [&](size_t row)
+    {
+        for (size_t i = 0; i + 1 < tuple_size; ++i)
+        {
+            if (lower[i]->compareAt(row, row, *upper[i], 1) != 0)
+                return false;
+        }
+        return true;
+    };
+
+    const bool merge = std::all_of(order.begin(), order.end(), isInterval);
+
+    MutableColumns out_lower;
+    MutableColumns out_upper;
+    for (size_t i = 0; i < tuple_size; ++i)
+    {
+        out_lower.push_back(lower[i]->cloneEmpty());
+        out_upper.push_back(upper[i]->cloneEmpty());
+    }
+
+    auto append = [&](size_t row)
+    {
+        for (size_t i = 0; i < tuple_size; ++i)
+        {
+            out_lower[i]->insertFrom(*lower[i], row);
+            out_upper[i]->insertFrom(*upper[i], row);
+        }
+    };
+
+    append(order.front());
+    for (size_t i = 1; i < order.size(); ++i)
+    {
+        const size_t row = order[i];
+
+        if (merge)
+        {
+            const size_t last = out_lower[0]->size() - 1;
+
+            Columns current_upper;
+            current_upper.reserve(out_upper.size());
+            for (const auto & column : out_upper)
+                current_upper.push_back(column->getPtr());
+
+            /// Merge when this entry starts at or before the previous one ends. Entries that merely
+            /// abut in the value domain but not lexicographically are left alone, since deciding
+            /// that needs a successor function this does not have.
+            if (compareCorners(lower, row, current_upper, last) <= 0)
+            {
+                if (compareCorners(current_upper, last, upper, row) < 0)
+                {
+                    for (size_t column = 0; column < tuple_size; ++column)
+                    {
+                        out_upper[column]->popBack(1);
+                        out_upper[column]->insertFrom(*upper[column], row);
+                    }
+                }
+                continue;
+            }
+        }
+
+        append(row);
+    }
+
+    Columns final_lower;
+    Columns final_upper;
+    for (size_t i = 0; i < tuple_size; ++i)
+    {
+        final_lower.push_back(std::move(out_lower[i]));
+        final_upper.push_back(std::move(out_upper[i]));
+    }
+
+    return {
+        KeyRangeSetOutcome::Built,
+        std::make_shared<const MergeTreeKeyRangeSet>(
+            std::move(final_lower), std::move(final_upper), std::move(indexes_mapping))};
+}
+
+bool MergeTreeKeyRangeSet::contains(const Columns & key_columns, size_t row) const
+{
+    if (key_columns.size() != lower.size())
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "MergeTreeKeyRangeSet::contains expects {} key columns, got {}", lower.size(), key_columns.size());
+
+    /// Over overlapping entries a single candidate is not enough, and answering approximately here
+    /// would be a wrong row-level answer rather than a lost optimization.
+    if (!disjoint)
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "MergeTreeKeyRangeSet::contains needs disjoint entries; the caller must check isDisjoint()");
+
+    const size_t entries = size();
+
+    /// Last entry whose lower corner is at or below the key. Entries are ordered and disjoint, so
+    /// no earlier entry can reach the key and no later one can start at or below it.
+    size_t begin = 0;
+    size_t end = entries;
+    while (begin < end)
+    {
+        const size_t middle = begin + (end - begin) / 2;
+        if (compareCorners(lower, middle, key_columns, row) <= 0)
+            begin = middle + 1;
+        else
+            end = middle;
+    }
+
+    if (begin == 0)
+        return false;
+
+    const size_t candidate = begin - 1;
+    return compareCorners(upper, candidate, key_columns, row) >= 0;
 }
 
 bool MergeTreeSetIndex::hasMonotonicFunctionsChain() const

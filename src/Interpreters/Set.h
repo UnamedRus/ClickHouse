@@ -259,6 +259,15 @@ using FieldValueRanges = std::vector<FieldValueRange>;
 
 int compareValue(const IColumn & lhs, const FieldValue & rhs, size_t row);
 
+/// Whether the entry at `row` lies below the key range's left corner, and above its right corner.
+/// Factored out so a search over ordered entries and a check of a single entry - the running
+/// maximum of upper corners - use one definition of each comparison.
+bool isBelowLeftCorner(const Columns & corners, size_t row, const FieldValueRanges & ranges, size_t tuple_size);
+bool isAboveRightCorner(const Columns & corners, size_t row, const FieldValueRanges & ranges, size_t tuple_size);
+
+/// First entry of `corners`, which must be non-decreasing, lying above the range's right corner.
+size_t lexUpperBound(const Columns & corners, const FieldValueRanges & ranges, size_t tuple_size, size_t set_size);
+
 /// The two corner searches over lexicographically sorted entries. `begin_corners` and
 /// `end_corners` are the column arrays each search compares against; for a set of points they
 /// are the same array, which is why the caller passes it twice rather than the searches
@@ -341,13 +350,16 @@ private:
   * of `n` key constraints has no compact form today: `KeyCondition` can express one through
   * `Range`, but `n` of them expand into an OR of RPN atoms.
   *
-  * Both corner arrays must be non-decreasing, which is what the binary searches in `checkInRange`
-  * require; sorting entries by their lower corner and keeping them disjoint achieves it. A caller
-  * that supplies overlapping entries gets wrong answers rather than slow ones, so the constructor
-  * checks.
+  * Entries must be ordered by their lower corner, and every entry must be non-empty. They need not
+  * be disjoint: a running maximum over the upper corners answers the granule test without the upper
+  * corners being ordered, which is what lets an entry constrain more than one column by a range.
   *
-  * Intervals are closed. That covers what this exists for - equality on a sort-key prefix and a
-  * range on the next column - and avoids carrying per-entry, per-column inclusion flags.
+  * Whether the entries happen to be disjoint is recorded, because it is what makes `contains`
+  * answerable by a single binary search. An entry whose columns before the last are all equalities
+  * is a contiguous interval of key tuples; entries built that way can be coalesced into disjoint
+  * ones, and anything more general cannot.
+  *
+  * Intervals are closed, which avoids carrying per-entry, per-column inclusion flags.
   */
 class MergeTreeKeyRangeSet
 {
@@ -375,6 +387,19 @@ public:
         const DataTypes & sparse_data_types,
         bool single_point = false) const;
 
+    /// Whether the entries are pairwise non-overlapping. Only then can `contains` be answered by a
+    /// single binary search, so a caller that needs the row-level test must check this first.
+    bool isDisjoint() const { return disjoint; }
+
+    /// Whether the key tuple at `row` of `key_columns` lies in any entry. This is the row-level
+    /// question, as against `checkInRange`'s granule-level one, and it is exact - but only over
+    /// disjoint entries, where at most one can contain a given tuple and a binary search finds it.
+    /// Raises if the entries are not disjoint rather than answering approximately: a caller reaching
+    /// here without checking `isDisjoint` has a bug, and a wrong row-level answer is a wrong result.
+    ///
+    /// `key_columns` must hold one column per tuple position, in the same order as the entries.
+    bool contains(const Columns & key_columns, size_t row) const;
+
     const std::vector<KeyTuplePositionMapping> & getIndexesMapping() const { return indexes_mapping; }
 
 private:
@@ -383,10 +408,56 @@ private:
 
     Columns lower;
     Columns upper;
+    /// Running lexicographic maximum of `upper` over entries `0..j`. Lets the granule test ask
+    /// "does any entry up to here reach the range's left corner" in constant time, which is what
+    /// removes the need for `upper` itself to be ordered.
+    Columns prefix_max_upper;
+    bool disjoint = false;
     std::vector<KeyTuplePositionMapping> indexes_mapping;
 };
 
 using MergeTreeKeyRangeSetPtr = std::shared_ptr<const MergeTreeKeyRangeSet>;
+
+/// What `buildKeyRangeSet` produced. The two outcomes are not interchangeable: one says the key is
+/// constrained to the entries, the other says it is constrained to nothing at all. Returning a
+/// single null pointer for both invites a caller to read "no usable set, prune nothing" where the
+/// truth is "no row can match", which is the difference between reading everything and reading
+/// nothing.
+enum class KeyRangeSetOutcome : uint8_t
+{
+    /// `set` is non-null and holds at least one entry.
+    Built,
+    /// No entry survived, so the key is constrained to the empty set and no row can match. A caller
+    /// pruning may drop every part; a caller rewriting a predicate must produce a false one.
+    MatchesNothing,
+};
+
+struct KeyRangeSetBuildResult
+{
+    KeyRangeSetOutcome outcome = KeyRangeSetOutcome::MatchesNothing;
+    /// Non-null exactly when `outcome` is `Built`.
+    MergeTreeKeyRangeSetPtr set;
+};
+
+/** Builds a key range set from per-position corner columns.
+  *
+  * Takes one lower and one upper corner column per key position. A column constrained by equality
+  * has the same column in both; a column left unconstrained uses the whole range. Nothing about
+  * the layout is positional, so any number of positions may carry a range.
+  *
+  * Does the work `MergeTreeKeyRangeSet`'s preconditions require and it deliberately does not do
+  * itself: drops rows that cannot match, and orders entries by their lower corner. Entries that are
+  * intervals of key tuples - every column before the last an equality - are also merged where they
+  * overlap, which makes them disjoint; more general entries are left as they are, because merging
+  * two boxes does not give a box.
+  *
+  * A row is dropped when its range is empty, and when any of its bounds is NULL - `k BETWEEN NULL
+  * AND 5` is NULL rather than true, so such a row satisfies nothing and contributes no entry.
+  */
+KeyRangeSetBuildResult buildKeyRangeSet(
+    const Columns & lower,
+    const Columns & upper,
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> indexes_mapping);
 
 namespace SetIndexDetail
 {
