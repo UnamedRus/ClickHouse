@@ -3143,35 +3143,13 @@ bool KeyCondition::tryPrepareSetIndexForKeyRanges(
     /// both corners. Nothing is positional, so any number of positions may carry a range.
     Columns lower;
     Columns upper;
-    lower.reserve(tuple_size);
-    upper.reserve(tuple_size);
+    DataTypes element_types;
+    if (!splitKeyRangeCorners(set_columns, set_types, lower, upper, element_types))
+        return false;
 
     for (size_t i = 0; i < tuple_size; ++i)
     {
-        DataTypePtr element_type = removeNullable(set_types[i]);
-        const ColumnPtr & element_column = set_columns[i];
-
-        if (const auto * tuple_type = typeid_cast<const DataTypeTuple *>(element_type.get()))
-        {
-            if (tuple_type->getElements().size() != 2
-                || !tuple_type->getElement(0)->equals(*tuple_type->getElement(1)))
-                return false;
-
-            const auto * tuple_column = typeid_cast<const ColumnTuple *>(element_column.get());
-            if (!tuple_column)
-                return false;
-
-            element_type = tuple_type->getElement(0);
-            lower.push_back(tuple_column->getColumnPtr(0));
-            upper.push_back(tuple_column->getColumnPtr(1));
-        }
-        else
-        {
-            lower.push_back(element_column);
-            upper.push_back(element_column);
-        }
-
-        if (!sameType(element_type, data_types[i]))
+        if (!sameType(element_types[i], data_types[i]))
             return false;
     }
 

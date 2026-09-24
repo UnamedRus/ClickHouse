@@ -1170,6 +1170,52 @@ BoolMask MergeTreeKeyRangeSet::finish(const SetIndexDetail::FieldValueRanges & r
     return {any_reaches_left, true};
 }
 
+bool splitKeyRangeCorners(
+    const Columns & elements,
+    const DataTypes & types,
+    Columns & lower,
+    Columns & upper,
+    DataTypes & element_types)
+{
+    if (elements.size() != types.size())
+        return false;
+
+    lower.clear();
+    upper.clear();
+    element_types.clear();
+    lower.reserve(elements.size());
+    upper.reserve(elements.size());
+    element_types.reserve(elements.size());
+
+    for (size_t i = 0; i < elements.size(); ++i)
+    {
+        DataTypePtr element_type = removeNullable(types[i]);
+
+        if (const auto * tuple_type = typeid_cast<const DataTypeTuple *>(element_type.get()))
+        {
+            if (tuple_type->getElements().size() != 2
+                || !tuple_type->getElement(0)->equals(*tuple_type->getElement(1)))
+                return false;
+
+            const auto * tuple_column = typeid_cast<const ColumnTuple *>(elements[i].get());
+            if (!tuple_column)
+                return false;
+
+            element_types.push_back(tuple_type->getElement(0));
+            lower.push_back(tuple_column->getColumnPtr(0));
+            upper.push_back(tuple_column->getColumnPtr(1));
+        }
+        else
+        {
+            element_types.push_back(element_type);
+            lower.push_back(elements[i]);
+            upper.push_back(elements[i]);
+        }
+    }
+
+    return true;
+}
+
 KeyRangeSetBuildResult buildKeyRangeSet(
     const Columns & lower,
     const Columns & upper,
@@ -1295,22 +1341,44 @@ KeyRangeSetBuildResult buildKeyRangeSet(
             std::move(final_lower), std::move(final_upper), std::move(indexes_mapping))};
 }
 
+bool MergeTreeKeyRangeSet::entryContains(size_t entry, const Columns & key_columns, size_t row) const
+{
+    /// Containment in a box is per column, not lexicographic: every column of the key must lie
+    /// between that column's bounds. For an entry that is an interval of key tuples the two agree,
+    /// but for a general box they do not.
+    for (size_t i = 0; i < key_columns.size(); ++i)
+    {
+        if (lower[i]->compareAt(entry, row, *key_columns[i], 1) > 0)
+            return false;
+        if (upper[i]->compareAt(entry, row, *key_columns[i], 1) < 0)
+            return false;
+    }
+    return true;
+}
+
 bool MergeTreeKeyRangeSet::contains(const Columns & key_columns, size_t row) const
 {
     if (key_columns.size() != lower.size())
         throw Exception(ErrorCodes::LOGICAL_ERROR,
             "MergeTreeKeyRangeSet::contains expects {} key columns, got {}", lower.size(), key_columns.size());
 
-    /// Over overlapping entries a single candidate is not enough, and answering approximately here
-    /// would be a wrong row-level answer rather than a lost optimization.
-    if (!disjoint)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "MergeTreeKeyRangeSet::contains needs disjoint entries; the caller must check isDisjoint()");
-
     const size_t entries = size();
 
-    /// Last entry whose lower corner is at or below the key. Entries are ordered and disjoint, so
-    /// no earlier entry can reach the key and no later one can start at or below it.
+    if (!disjoint)
+    {
+        /// Overlapping entries: several may contain the key and lexicographic order no longer
+        /// isolates one, so there is nothing to binary search. Linear in the number of entries -
+        /// `isDisjoint` lets a caller that cannot afford this avoid reaching it.
+        for (size_t entry = 0; entry < entries; ++entry)
+        {
+            if (entryContains(entry, key_columns, row))
+                return true;
+        }
+        return false;
+    }
+
+    /// Disjoint entries: the last one whose lower corner is at or below the key is the only one
+    /// whose span can hold it, so a binary search finds the single candidate.
     size_t begin = 0;
     size_t end = entries;
     while (begin < end)
@@ -1325,8 +1393,9 @@ bool MergeTreeKeyRangeSet::contains(const Columns & key_columns, size_t row) con
     if (begin == 0)
         return false;
 
-    const size_t candidate = begin - 1;
-    return compareCorners(upper, candidate, key_columns, row) >= 0;
+    /// Still a per-column check: the candidate's span holds the key, which for a box is weaker
+    /// than the box holding it.
+    return entryContains(begin - 1, key_columns, row);
 }
 
 bool MergeTreeSetIndex::hasMonotonicFunctionsChain() const

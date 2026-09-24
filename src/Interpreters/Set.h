@@ -392,10 +392,11 @@ public:
     bool isDisjoint() const { return disjoint; }
 
     /// Whether the key tuple at `row` of `key_columns` lies in any entry. This is the row-level
-    /// question, as against `checkInRange`'s granule-level one, and it is exact - but only over
-    /// disjoint entries, where at most one can contain a given tuple and a binary search finds it.
-    /// Raises if the entries are not disjoint rather than answering approximately: a caller reaching
-    /// here without checking `isDisjoint` has a bug, and a wrong row-level answer is a wrong result.
+    /// question, as against `checkInRange`'s granule-level one, and it is exact either way.
+    ///
+    /// Over disjoint entries a binary search finds the one candidate. Over overlapping entries it
+    /// is a linear scan, because several may hold the key and lexicographic order no longer
+    /// isolates one; `isDisjoint` lets a caller that cannot afford that avoid reaching it.
     ///
     /// `key_columns` must hold one column per tuple position, in the same order as the entries.
     bool contains(const Columns & key_columns, size_t row) const;
@@ -403,6 +404,7 @@ public:
     const std::vector<KeyTuplePositionMapping> & getIndexesMapping() const { return indexes_mapping; }
 
 private:
+    bool entryContains(size_t entry, const Columns & key_columns, size_t row) const;
     SetIndexDetail::FieldValueRanges makeValueRanges() const;
     BoolMask finish(const SetIndexDetail::FieldValueRanges & ranges) const;
 
@@ -454,6 +456,22 @@ struct KeyRangeSetBuildResult
   * A row is dropped when its range is empty, and when any of its bounds is NULL - `k BETWEEN NULL
   * AND 5` is NULL rather than true, so such a row satisfies nothing and contributes no entry.
   */
+/** Splits per-position set elements into corner columns.
+  *
+  * A position constrained by a range carries a `Tuple(lower, upper)` and becomes the two corners;
+  * anything else stands for both, which is how an equality is expressed. Returns false for a tuple
+  * that is not exactly two elements of one type - a shape this cannot interpret, and guessing at it
+  * would mean guessing at which bound is which.
+  *
+  * `element_types` receives the type each position constrains, with the tuple unwrapped.
+  */
+bool splitKeyRangeCorners(
+    const Columns & elements,
+    const DataTypes & types,
+    Columns & lower,
+    Columns & upper,
+    DataTypes & element_types);
+
 KeyRangeSetBuildResult buildKeyRangeSet(
     const Columns & lower,
     const Columns & upper,
