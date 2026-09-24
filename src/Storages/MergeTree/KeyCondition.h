@@ -610,6 +610,14 @@ private:
         const RPNBuilderFunctionTreeNode & func,
         const BuildInfo & info,
         RPNElement & out);
+    /// Recognises `__keyRangesIn(tuple(k1, ..., kn), <set of (prefix..., lower, upper)>)`, the
+    /// compact form of a disjunction of key constraints. Sets `out.function` itself, including
+    /// `ALWAYS_FALSE` when the set turns out to constrain the key to nothing.
+    bool tryPrepareSetIndexForKeyRanges(
+        const RPNBuilderFunctionTreeNode & func,
+        const BuildInfo & info,
+        RPNElement & out);
+
     bool tryPrepareSetIndexForHas(
         const RPNBuilderFunctionTreeNode & func,
         const BuildInfo & info,

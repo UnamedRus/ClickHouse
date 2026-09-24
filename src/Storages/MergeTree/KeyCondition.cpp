@@ -3076,6 +3076,122 @@ static DataTypePtr narrowVariantToOccupiedAlternatives(
     return std::make_shared<DataTypeVariant>(occupied_types);
 }
 
+bool KeyCondition::tryPrepareSetIndexForKeyRanges(
+    const RPNBuilderFunctionTreeNode & func,
+    const BuildInfo & info,
+    RPNElement & out)
+{
+    const RPNBuilderTreeNode & left_arg = func.getArgumentAt(0);
+    std::vector<MergeTreeSetIndex::KeyTuplePositionMapping> indexes_mapping;
+    std::vector<std::optional<DeterministicKeyTransformDag>> set_transforming_dags;
+    DataTypes data_types;
+    size_t left_args_count = 0;
+
+    analyzeKeyExpressionForSetIndex(
+        left_arg,
+        indexes_mapping,
+        set_transforming_dags,
+        data_types,
+        left_args_count,
+        info,
+        out.relaxed);
+
+    if (indexes_mapping.empty())
+        return false;
+
+    /// Every tuple element must map to a key column. An entry here is an interval of key tuples,
+    /// and dropping a position would leave something that is no longer one - unlike a set of
+    /// points, where a partial mapping merely weakens the condition.
+    if (indexes_mapping.size() != left_args_count)
+        return false;
+
+    /// Constants are not transformed to the key's type. An interval is a pair of bounds, and
+    /// converting them independently can widen or narrow it; a widened interval is merely less
+    /// selective, but a narrowed one drops matching rows. Decline instead.
+    for (const auto & transform : set_transforming_dags)
+    {
+        if (transform)
+            return false;
+    }
+
+    const RPNBuilderTreeNode & right_arg = func.getArgumentAt(1);
+    auto future_set = right_arg.tryGetPreparedSet();
+    if (!future_set)
+        return false;
+
+    if (info.require_ready_sets && !future_set->get())
+        return false;
+
+    auto prepared_set = future_set->buildOrderedSetInplace(right_arg.getTreeContext().getQueryContext());
+    if (!prepared_set || !prepared_set->hasExplicitSetElements())
+        return false;
+
+    auto set_columns = prepared_set->getSetElements();
+    const size_t tuple_size = indexes_mapping.size();
+
+    const auto set_types = future_set->getTypes();
+    if (set_columns.size() != tuple_size || set_types.size() != tuple_size)
+        return false;
+
+    auto sameType = [](const DataTypePtr & lhs, const DataTypePtr & rhs)
+    {
+        return removeNullable(lhs)->equals(*removeNullable(rhs));
+    };
+
+    /// One set column per key position. A position constrained by a range carries a
+    /// `Tuple(lower, upper)`; one constrained by equality carries the value itself, which stands for
+    /// both corners. Nothing is positional, so any number of positions may carry a range.
+    Columns lower;
+    Columns upper;
+    lower.reserve(tuple_size);
+    upper.reserve(tuple_size);
+
+    for (size_t i = 0; i < tuple_size; ++i)
+    {
+        DataTypePtr element_type = removeNullable(set_types[i]);
+        const ColumnPtr & element_column = set_columns[i];
+
+        if (const auto * tuple_type = typeid_cast<const DataTypeTuple *>(element_type.get()))
+        {
+            if (tuple_type->getElements().size() != 2
+                || !tuple_type->getElement(0)->equals(*tuple_type->getElement(1)))
+                return false;
+
+            const auto * tuple_column = typeid_cast<const ColumnTuple *>(element_column.get());
+            if (!tuple_column)
+                return false;
+
+            element_type = tuple_type->getElement(0);
+            lower.push_back(tuple_column->getColumnPtr(0));
+            upper.push_back(tuple_column->getColumnPtr(1));
+        }
+        else
+        {
+            lower.push_back(element_column);
+            upper.push_back(element_column);
+        }
+
+        if (!sameType(element_type, data_types[i]))
+            return false;
+    }
+
+    auto result = buildKeyRangeSet(lower, upper, std::move(indexes_mapping));
+
+    if (result.outcome == KeyRangeSetOutcome::MatchesNothing)
+    {
+        /// Not the same as having no set: the key is constrained to the empty set, so nothing matches.
+        out.function = RPNElement::ALWAYS_FALSE;
+        return true;
+    }
+
+    out.function = RPNElement::FUNCTION_IN_KEY_RANGE_SET;
+    out.key_range_set = result.set;
+    for (const auto & index_mapping : out.key_range_set->getIndexesMapping())
+        out.key_columns.push_back(index_mapping.key_index);
+
+    return true;
+}
+
 bool KeyCondition::tryPrepareSetIndexForHas(
     const RPNBuilderFunctionTreeNode & func,
     const BuildInfo & info,
@@ -4237,6 +4353,13 @@ bool KeyCondition::extractAtomFromTree(const RPNBuilderTreeNode & node, const Bu
                 }
                 else
                     return false;
+            }
+
+            if (func_name == "__keyRangesIn")
+            {
+                /// The try function describes the atom completely, including the always-false case,
+                /// so there is no atom_map entry to apply afterwards.
+                return tryPrepareSetIndexForKeyRanges(func, info, out);
             }
 
             if (func_name == "has" || func_name == "notHas")
