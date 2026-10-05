@@ -26,7 +26,7 @@ SET query_plan_optimize_lazy_materialization = 1;
 SET query_plan_max_limit_for_lazy_materialization = 10;
 
 SELECT 'default disabled';
-SELECT countIf(explain LIKE '%Lazily read columns:%')
+SELECT max(explain LIKE '%Lazily read columns:%')
 FROM
 (
     EXPLAIN PLAN actions = 1
@@ -37,7 +37,7 @@ FROM
 );
 
 SELECT 'explicitly enabled';
-SELECT countIf(explain LIKE '%Lazily read columns:%')
+SELECT max(explain LIKE '%Lazily read columns:%')
 FROM
 (
     EXPLAIN PLAN actions = 1
@@ -49,7 +49,7 @@ FROM
 );
 
 SELECT 'bounded by max limit';
-SELECT countIf(explain LIKE '%Lazily read columns:%')
+SELECT max(explain LIKE '%Lazily read columns:%')
 FROM
 (
     EXPLAIN PLAN actions = 1
@@ -61,7 +61,7 @@ FROM
 );
 
 SELECT 'unbounded max enables with ties';
-SELECT countIf(explain LIKE '%Lazily read columns:%')
+SELECT max(explain LIKE '%Lazily read columns:%')
 FROM
 (
     EXPLAIN PLAN actions = 1
@@ -75,7 +75,7 @@ FROM
 -- The dedicated flag stays authoritative when the max limit is unbounded: without it,
 -- `LIMIT ... WITH TIES` must not be optimized no matter how the limit compares to the bound.
 SELECT 'unbounded max keeps with ties disabled';
-SELECT countIf(explain LIKE '%Lazily read columns:%')
+SELECT max(explain LIKE '%Lazily read columns:%')
 FROM
 (
     EXPLAIN PLAN actions = 1
@@ -87,7 +87,7 @@ FROM
 );
 
 SELECT 'unbounded max keeps small limit with ties disabled';
-SELECT countIf(explain LIKE '%Lazily read columns:%')
+SELECT max(explain LIKE '%Lazily read columns:%')
 FROM
 (
     EXPLAIN PLAN actions = 1
