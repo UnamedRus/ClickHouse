@@ -7580,7 +7580,10 @@ Use query plan for lazy materialization optimization.
 Allow query plan lazy materialization optimization for `LIMIT WITH TIES`
 if the limit value does not exceed
 `query_plan_max_limit_for_lazy_materialization`. Takes effect only if
-`query_plan_optimize_lazy_materialization` is enabled. Note that
+`query_plan_optimize_lazy_materialization` is enabled. It applies only
+to `LIMIT n [OFFSET m] WITH TIES` with a non-negative integer limit and
+offset: fractional limits (`LIMIT 0.5 WITH TIES`) and fractional or
+negative offsets are not optimized. Note that
 `query_plan_max_limit_for_lazy_materialization` bounds the written
 `LIMIT`, not the number of rows `LIMIT ... WITH TIES` returns: the tied
 rows past the limit are read lazily too. The optimization needs the
