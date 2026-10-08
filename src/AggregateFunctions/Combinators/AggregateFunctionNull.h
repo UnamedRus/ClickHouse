@@ -120,13 +120,6 @@ public:
         return nested_function->getName();
     }
 
-    DataTypePtr getStateType() const override
-    {
-        if (hasStateOfNestedFunction())
-            return getNestedStateType();
-        return IAggregateFunction::getStateType();
-    }
-
     DataTypePtr getNormalizedStateType() const override
     {
         if (hasStateOfNestedFunction())
@@ -385,6 +378,8 @@ public:
 
     DataTypePtr getStateType() const override
     {
+        if (hasStateOfNestedFunction())
+            return getNestedStateType();
         return this->getStateTypeWithVersionOf(*nested_function);
     }
 
