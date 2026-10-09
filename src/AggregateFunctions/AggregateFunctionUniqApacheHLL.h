@@ -102,13 +102,14 @@ public:
 
     void merge(const HllSketchData & rhs, uint8_t lg_config_k)
     {
-        if (!rhs.sk_update && !rhs.sk_union)
+        const bool rhs_has_update = rhs.sk_update && !rhs.sk_update->is_empty();
+        if (!rhs_has_update && !rhs.sk_union)
             return;
 
         datasketches::hll_union * u = getSkUnion(lg_config_k);
 
         /// `rhs` may hold both sketches; take both without modifying it.
-        if (rhs.sk_update)
+        if (rhs_has_update)
             u->update(*rhs.sk_update);
 
         /// The union accepts a sketch of any type, and `HLL_8` is its own type, so there is no re-encoding.
@@ -118,8 +119,10 @@ public:
         foldUpdateIntoUnionIfNeeded();
     }
 
-    /// You can only call this for an empty object.
-    void read(ReadBuffer & in, uint8_t lg_config_k)
+    /// You can only call this for an empty object. The sketch is kept as it was written, with its own resolution and
+    /// storage type: reading a state must not lose what writing it back would then persist. It is folded into a union,
+    /// at the declared resolution, only when it is merged.
+    void read(ReadBuffer & in)
     {
         datasketches::hll_sketch::vector_bytes bytes;
         readVectorBinary(bytes, in);
@@ -129,7 +132,7 @@ public:
         try
         {
             auto sk = datasketches::hll_sketch::deserialize(bytes.data(), bytes.size());
-            getSkUnion(lg_config_k)->update(std::move(sk));
+            sk_update = std::make_unique<datasketches::hll_sketch>(std::move(sk));
         }
         catch (const DB::Exception &)
         {
@@ -261,7 +264,7 @@ public:
 
     void deserialize(AggregateDataPtr __restrict place, ReadBuffer & buf, std::optional<size_t> /* version */, Arena *) const override
     {
-        this->data(place).read(buf, lg_config_k);
+        this->data(place).read(buf);
     }
 
     void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
