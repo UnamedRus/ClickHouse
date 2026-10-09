@@ -4,6 +4,7 @@
 
 #if USE_DATASKETCHES
 
+#include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <AggregateFunctions/Helpers.h>
 #include <AggregateFunctions/IAggregateFunction.h>
 #include <Columns/ColumnDecimal.h>
@@ -12,6 +13,7 @@
 #include <Common/assert_cast.h>
 #include <Core/Field.h>
 #include <Core/UUID.h>
+#include <DataTypes/DataTypeAggregateFunction.h>
 #include <DataTypes/DataTypeDate.h>
 #include <DataTypes/DataTypeDate32.h>
 #include <DataTypes/DataTypeDateTime.h>
@@ -250,6 +252,21 @@ public:
                 rhs_types.begin(),
                 rhs_types.end(),
                 [](const auto & lhs, const auto & rhs_type) { return removeNullable(lhs)->equals(*removeNullable(rhs_type)); });
+    }
+
+    /// The parameters do not change what a state means, so every spelling of them is the same type wherever a common type is
+    /// needed (`UNION ALL`, arrays, `if`) and wherever a state is accepted by the name of its type. The default parameters
+    /// stand for all of them.
+    DataTypePtr getNormalizedStateType() const override
+    {
+        DataTypes normalized_argument_types;
+        normalized_argument_types.reserve(this->argument_types.size());
+        for (const auto & type : this->argument_types)
+            normalized_argument_types.emplace_back(type->getNormalizedType());
+
+        AggregateFunctionProperties properties;
+        auto function = AggregateFunctionFactory::instance().get("uniqApacheHLL", NullsAction::EMPTY, normalized_argument_types, {}, properties);
+        return std::make_shared<DataTypeAggregateFunction>(function, normalized_argument_types, Array{});
     }
 
     void mergeImpl(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena *) const override
