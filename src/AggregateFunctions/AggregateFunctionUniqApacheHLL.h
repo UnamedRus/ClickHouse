@@ -72,7 +72,7 @@ private:
         if (sk_union && sk_update)
         {
             sk_union->update(*sk_update);
-            sk_update.reset();
+            sk_update = nullptr;
         }
     }
 
@@ -199,7 +199,7 @@ public:
 
             /// Other DataSketches implementations ignore empty strings, and the sketch of a mixed
             /// input must be the same as theirs.
-            if (value.size() == 0)
+            if (value.empty())
                 return;
 
             data.insertData(value.data(), value.size(), lg_config_k, target_type);
