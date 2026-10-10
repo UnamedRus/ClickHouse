@@ -149,7 +149,9 @@ Merging a lower-resolution sketch permanently lowers the result's resolution, re
     FunctionDocumentation::Category category = FunctionDocumentation::Category::AggregateFunction;
     FunctionDocumentation documentation = {description, syntax, arguments, parameters, returned_value, examples, introduced_in, category};
 
-    AggregateFunctionProperties properties = { .returns_default_when_only_null = true, .is_order_dependent = false };
+    /// The HIP estimate and the bytes of the sketch depend on the order of the updates and of the merges, so the planner must not
+    /// remove an `ORDER BY` below this function.
+    AggregateFunctionProperties properties = { .returns_default_when_only_null = true, .is_order_dependent = true };
 
     factory.registerFunction("uniqApacheHLL", {createAggregateFunctionUniqApacheHLL, documentation, properties});
 }
