@@ -11,6 +11,7 @@
 #include <Columns/ColumnsNumber.h>
 #include <Common/Exception.h>
 #include <Common/assert_cast.h>
+#include <Common/transformEndianness.h>
 #include <Core/Field.h>
 #include <Core/UUID.h>
 #include <DataTypes/DataTypeAggregateFunction.h>
@@ -215,11 +216,11 @@ public:
 
             if constexpr (std::is_same_v<T, UUID>)
             {
-                /// Convert the two host-order halves of a `UUID` to canonical bytes.
-                const UInt64 halves[2] = {
-                    std::byteswap(UUIDHelpers::getHighBytes(value)),
-                    std::byteswap(UUIDHelpers::getLowBytes(value)),
-                };
+                /// The two halves of a `UUID` are numbers in host order; the canonical bytes are their big-endian
+                /// representation on every platform.
+                UInt64 halves[2] = {UUIDHelpers::getHighBytes(value), UUIDHelpers::getLowBytes(value)};
+                transformEndianness<std::endian::big>(halves[0]);
+                transformEndianness<std::endian::big>(halves[1]);
                 data.insertData(reinterpret_cast<const char *>(halves), sizeof(halves), lg_config_k, target_type);
             }
             else if constexpr (std::is_same_v<T, IPv6>)
