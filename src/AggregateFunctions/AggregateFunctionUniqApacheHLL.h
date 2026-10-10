@@ -91,13 +91,16 @@ public:
         getSkUpdate(lg_config_k, tgt_type)->update(static_cast<const void *>(data), size);
     }
 
-    UInt64 size() const
+    /// With `composite_estimate_after_merge` the estimate of a merged union is computed from its registers only, so it does not
+    /// depend on the order of the merges. The library's own estimate of a union that has merged only small sketches is the
+    /// HIP estimate, which is more accurate for such a union but depends on that order.
+    UInt64 size(bool composite_estimate_after_merge) const
     {
         foldUpdateIntoUnionIfNeeded();
 
         /// Rounding preserves exact cardinalities despite floating-point error.
         if (sk_union)
-            return static_cast<UInt64>(std::llround(sk_union->get_estimate()));
+            return static_cast<UInt64>(std::llround(composite_estimate_after_merge ? sk_union->get_composite_estimate() : sk_union->get_estimate()));
         if (sk_update)
             return static_cast<UInt64>(std::llround(sk_update->get_estimate()));
         return 0;
@@ -175,16 +178,19 @@ class AggregateFunctionUniqApacheHLL final : public IAggregateFunctionDataHelper
 
     uint8_t lg_config_k;
     datasketches::target_hll_type target_type;
+    bool composite_estimate_after_merge;
 
 public:
     AggregateFunctionUniqApacheHLL(
         uint8_t lg_config_k_,
         datasketches::target_hll_type target_type_,
+        bool composite_estimate_after_merge_,
         const DataTypes & argument_types_,
         const Array & params_)
         : Base(argument_types_, params_, std::make_shared<DataTypeUInt64>())
         , lg_config_k(lg_config_k_)
         , target_type(target_type_)
+        , composite_estimate_after_merge(composite_estimate_after_merge_)
     {
     }
 
@@ -287,7 +293,7 @@ public:
 
     void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
     {
-        assert_cast<ColumnUInt64 &>(to).getData().push_back(this->data(place).size());
+        assert_cast<ColumnUInt64 &>(to).getData().push_back(this->data(place).size(composite_estimate_after_merge));
     }
 };
 

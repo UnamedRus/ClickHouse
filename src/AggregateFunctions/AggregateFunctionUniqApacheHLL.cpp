@@ -21,10 +21,11 @@ static AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
 {
     uint8_t lg_config_k = 12;
     datasketches::target_hll_type target_type = datasketches::HLL_4;
+    bool composite_estimate_after_merge = false;
 
-    if (params.size() > 2)
+    if (params.size() > 3)
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-            "Aggregate function {} accepts at most two parameters (lg_k, type).", name);
+            "Aggregate function {} accepts at most three parameters (lg_k, type, estimator).", name);
 
     if (!params.empty())
     {
@@ -35,7 +36,7 @@ static AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
         lg_config_k = static_cast<uint8_t>(lg_k_param);
     }
 
-    if (params.size() == 2)
+    if (params.size() >= 2)
     {
         if (params[1].getType() != Field::Types::String)
             throw Exception(ErrorCodes::BAD_ARGUMENTS,
@@ -53,6 +54,22 @@ static AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
                 "Parameter type for aggregate function {} must be one of 'HLL_4', 'HLL_6', 'HLL_8'.", name);
     }
 
+    if (params.size() == 3)
+    {
+        if (params[2].getType() != Field::Types::String)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Parameter estimator for aggregate function {} must be a string.", name);
+
+        const String estimator_param = params[2].safeGet<String>();
+        if (estimator_param == "DEFAULT")
+            composite_estimate_after_merge = false;
+        else if (estimator_param == "COMPOSITE")
+            composite_estimate_after_merge = true;
+        else
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Parameter estimator for aggregate function {} must be one of 'DEFAULT', 'COMPOSITE'.", name);
+    }
+
     assertUnary(name, argument_types);
 
     const IDataType & argument_type = *argument_types[0];
@@ -60,35 +77,35 @@ static AggregateFunctionPtr createAggregateFunctionUniqApacheHLL(
 
     /// Unlike other decimals, `DateTime64` has an interoperable representation as epoch ticks.
     if (which.isDateTime64())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime64::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime64::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
 
     /// Exclude wide integers: DataSketches has no portable representation for them.
     if (!which.isInt128() && !which.isInt256() && !which.isUInt128() && !which.isUInt256())
     {
         AggregateFunctionPtr res(createWithNumericType<AggregateFunctionUniqApacheHLL>(
-            argument_type, lg_config_k, target_type, argument_types, params));
+            argument_type, lg_config_k, target_type, composite_estimate_after_merge, argument_types, params));
         if (res)
             return res;
     }
 
     if (which.isDate())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
     if (which.isDate32())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate32::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDate32::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
     if (which.isDateTime())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeDateTime::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
     if (which.isStringOrFixedString())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<String>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<String>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
     if (which.isUUID())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeUUID::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeUUID::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
     if (which.isIPv4())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv4::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv4::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
     if (which.isIPv6())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv6::FieldType>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<DataTypeIPv6::FieldType>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
 
     /// For `Nullable(Nothing)` the `Null` combinator replaces this function with `nothing`, but it must be created first.
     if (argument_type.onlyNull())
-        return std::make_shared<AggregateFunctionUniqApacheHLL<UInt8>>(lg_config_k, target_type, argument_types, params);
+        return std::make_shared<AggregateFunctionUniqApacheHLL<UInt8>>(lg_config_k, target_type, composite_estimate_after_merge, argument_types, params);
 
     throw Exception(ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
         "Illegal type {} of argument for aggregate function {}. Use uniq, uniqCombined or uniqHLL12 for unsupported types.",
@@ -110,16 +127,18 @@ Unsupported types and multiple arguments are rejected. Use `uniq`, `uniqCombined
 `NULL` values and empty strings are ignored, as in the Java, Python and C++ implementations and in Spark; unlike `uniq`, an empty string is not counted as a value.
 A `Nullable` argument gives the same state as a non-`Nullable` one, a bare DataSketches sketch, and the same state type, `AggregateFunction(uniqApacheHLL, T)`.
 
-Merging can switch from the HIP estimator to the less accurate composite estimator, so results can depend on partitioning across threads, parts and shards.
+Merging can switch from the HIP estimator to the less accurate composite estimator, and the HIP estimate of a union of small sketches depends on the order of the merges, so with the default estimator results can depend on partitioning across threads, parts and shards.
+The `estimator` parameter `'COMPOSITE'` makes the result of a merged state depend only on the merged sketches and not on the order of the merges, at the cost of a lower accuracy for unions of small sketches. It does not change the state.
 Merging a lower-resolution sketch permanently lowers the result's resolution, regardless of the declared `lg_k`.
     )";
-    FunctionDocumentation::Syntax syntax = "uniqApacheHLL([lg_k, [type]])(x)";
+    FunctionDocumentation::Syntax syntax = "uniqApacheHLL([lg_k, [type, [estimator]]])(x)";
     FunctionDocumentation::Arguments arguments = {
         {"x", "Column to compute the number of distinct values of.", {"(U)Int8/16/32/64", "Enum", "BFloat16", "Float32", "Float64", "String", "FixedString", "UUID", "IPv4", "IPv6", "Date", "Date32", "DateTime", "DateTime64"}},
     };
     FunctionDocumentation::Parameters parameters = {
         {"lg_k", "Optional. Log-base-2 of the number of buckets, in range [4, 21]. Higher means better accuracy and more memory. Default: 12.", {"UInt8"}},
         {"type", "Optional. Storage format of the sketch: 'HLL_4', 'HLL_6', or 'HLL_8'. Default: 'HLL_4'.", {"String"}},
+        {"estimator", "Optional. The estimator used for the result of a merged state: 'DEFAULT' (the estimator of the library, which can depend on the order of the merges) or 'COMPOSITE' (depends only on the merged sketches). Default: 'DEFAULT'.", {"String"}},
     };
     FunctionDocumentation::ReturnedValue returned_value = {"Returns the approximate number of distinct values.", {"UInt64"}};
     FunctionDocumentation::Examples examples = {
