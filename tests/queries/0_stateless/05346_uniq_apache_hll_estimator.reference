@@ -1,10 +1,17 @@
 the default estimate of a merged state depends on the order of the merges
-1
+0
 the composite estimate does not
 1
 the estimator does not change the state, and states of any estimator have one type where a common type is needed
 1
 2
-a sketch that is not merged keeps its estimate
+a small sketch has the same estimate
 100	100
+the default estimate of a sketch that is built by inserts depends on the order of the inserts
+1
+the composite estimate of such a sketch does not
+1
+the same for a state that is finalized, and for a state that is read
+1
+1
 wrong parameters

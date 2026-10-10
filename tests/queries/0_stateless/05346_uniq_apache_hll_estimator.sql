@@ -29,8 +29,38 @@ SELECT 'the estimator does not change the state, and states of any estimator hav
 SELECT hex(toString(uniqApacheHLLState(11, 'HLL_8', 'COMPOSITE')(number))) = hex(toString(uniqApacheHLLState(11, 'HLL_8', 'DEFAULT')(number))) FROM numbers(1000);
 SELECT length([uniqApacheHLLState(8, 'HLL_6', 'COMPOSITE')(toUInt64(1)), uniqApacheHLLState(toUInt64(2))]);
 
-SELECT 'a sketch that is not merged keeps its estimate';
+SELECT 'a small sketch has the same estimate';
 SELECT uniqApacheHLL(11, 'HLL_8', 'COMPOSITE')(number), uniqApacheHLL(11, 'HLL_8', 'DEFAULT')(number) FROM numbers(100);
+
+SELECT 'the default estimate of a sketch that is built by inserts depends on the order of the inserts';
+SELECT count() = 3 AND uniqExact(r) > 1 FROM
+(
+    SELECT uniqApacheHLL(11, 'HLL_8')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY x) UNION ALL
+    SELECT uniqApacheHLL(11, 'HLL_8')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY -x) UNION ALL
+    SELECT uniqApacheHLL(11, 'HLL_8')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY cityHash64(x))
+);
+
+SELECT 'the composite estimate of such a sketch does not';
+SELECT count() = 3 AND uniqExact(r) = 1 AND any(r) BETWEEN 2800 AND 3200 FROM
+(
+    SELECT uniqApacheHLL(11, 'HLL_8', 'COMPOSITE')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY x) UNION ALL
+    SELECT uniqApacheHLL(11, 'HLL_8', 'COMPOSITE')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY -x) UNION ALL
+    SELECT uniqApacheHLL(11, 'HLL_8', 'COMPOSITE')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY cityHash64(x))
+);
+
+SELECT 'the same for a state that is finalized, and for a state that is read';
+SELECT count() = 3 AND uniqExact(r) = 1 FROM
+(
+    SELECT finalizeAggregation(uniqApacheHLLState(11, 'HLL_8', 'COMPOSITE')(x)) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY x) UNION ALL
+    SELECT finalizeAggregation(uniqApacheHLLState(11, 'HLL_8', 'COMPOSITE')(x)) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY -x) UNION ALL
+    SELECT finalizeAggregation(uniqApacheHLLState(11, 'HLL_8', 'COMPOSITE')(x)) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY cityHash64(x))
+);
+SELECT count() = 3 AND uniqExact(r) = 1 FROM
+(
+    SELECT finalizeAggregation(CAST(toString(uniqApacheHLLState(11, 'HLL_8')(x)), 'AggregateFunction(uniqApacheHLL(11, \'HLL_8\', \'COMPOSITE\'), UInt64)')) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY x) UNION ALL
+    SELECT finalizeAggregation(CAST(toString(uniqApacheHLLState(11, 'HLL_8')(x)), 'AggregateFunction(uniqApacheHLL(11, \'HLL_8\', \'COMPOSITE\'), UInt64)')) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY -x) UNION ALL
+    SELECT finalizeAggregation(CAST(toString(uniqApacheHLLState(11, 'HLL_8')(x)), 'AggregateFunction(uniqApacheHLL(11, \'HLL_8\', \'COMPOSITE\'), UInt64)')) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY cityHash64(x))
+);
 
 SELECT 'wrong parameters';
 SELECT uniqApacheHLL(11, 'HLL_8', 'HIP')(number) FROM numbers(1); -- { serverError BAD_ARGUMENTS }
