@@ -1,23 +1,15 @@
 -- Tags: no-fasttest, no-cpu-s390x
 -- ^ DataSketches is not built in fast-test builds.
 
--- The union of sketches that are all small replays their values into the union, and the HIP estimate of such a union depends
--- on the order of the merges. The third parameter, `estimator`, chooses the estimate of a merged state: `DEFAULT` is the one of
--- the library, `COMPOSITE` is computed from the merged sketches only.
+-- The HIP estimate of the library depends on the order of the inserts and of the merges. The third parameter, `estimator`, chooses
+-- the estimate: `DEFAULT` is the one of the library, `COMPOSITE` is computed from the registers of the sketch only, so it does not
+-- depend on the order. Only the second is checked here, because the first one differs between orders only sometimes.
 
 SET max_threads = 1;
 
 -- 8 sketches of 100 values each, neighbours overlap by half, 450 distinct values in total, merged in three orders
 
-SELECT 'the default estimate of a merged state depends on the order of the merges';
-SELECT count() = 3 AND uniqExact(r) > 1 FROM
-(
-    SELECT uniqApacheHLLMerge(11, 'HLL_8')(s) AS r FROM (SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(0) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(1) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(2) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(3) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(4) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(5) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(6) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(7) * 50 + number) AS s FROM numbers(100)) UNION ALL
-    SELECT uniqApacheHLLMerge(11, 'HLL_8')(s) AS r FROM (SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(7) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(6) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(5) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(4) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(3) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(2) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(1) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(0) * 50 + number) AS s FROM numbers(100)) UNION ALL
-    SELECT uniqApacheHLLMerge(11, 'HLL_8')(s) AS r FROM (SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(3) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(6) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(0) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(5) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(1) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(7) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(2) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(4) * 50 + number) AS s FROM numbers(100))
-);
-
-SELECT 'the composite estimate does not';
+SELECT 'the composite estimate of a merged state does not depend on the order of the merges';
 SELECT count() = 3 AND uniqExact(r) = 1 AND any(r) BETWEEN 430 AND 470 FROM
 (
     SELECT uniqApacheHLLMerge(11, 'HLL_8', 'COMPOSITE')(s) AS r FROM (SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(0) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(1) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(2) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(3) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(4) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(5) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(6) * 50 + number) AS s FROM numbers(100) UNION ALL SELECT uniqApacheHLLState(11, 'HLL_8')(toUInt64(7) * 50 + number) AS s FROM numbers(100)) UNION ALL
@@ -32,15 +24,7 @@ SELECT length([uniqApacheHLLState(8, 'HLL_6', 'COMPOSITE')(toUInt64(1)), uniqApa
 SELECT 'a small sketch has the same estimate';
 SELECT uniqApacheHLL(11, 'HLL_8', 'COMPOSITE')(number), uniqApacheHLL(11, 'HLL_8', 'DEFAULT')(number) FROM numbers(100);
 
-SELECT 'the default estimate of a sketch that is built by inserts depends on the order of the inserts';
-SELECT count() = 3 AND uniqExact(r) > 1 FROM
-(
-    SELECT uniqApacheHLL(11, 'HLL_8')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY x) UNION ALL
-    SELECT uniqApacheHLL(11, 'HLL_8')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY -x) UNION ALL
-    SELECT uniqApacheHLL(11, 'HLL_8')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY cityHash64(x))
-);
-
-SELECT 'the composite estimate of such a sketch does not';
+SELECT 'the composite estimate of a sketch that is built by inserts does not depend on the order of the inserts';
 SELECT count() = 3 AND uniqExact(r) = 1 AND any(r) BETWEEN 2800 AND 3200 FROM
 (
     SELECT uniqApacheHLL(11, 'HLL_8', 'COMPOSITE')(x) AS r FROM (SELECT number AS x FROM numbers(3000) ORDER BY x) UNION ALL
