@@ -122,6 +122,10 @@ The `-State` and `-Merge` combinators exchange Apache DataSketches HLL sketches 
 
 For interoperability, integers of at most 64 bits are hashed as 8-byte integers, floating-point values as IEEE-754 doubles, strings as raw bytes, `UUID` values as canonical 16 bytes, and `IPv6` addresses in network order.
 `Date`, `Date32`, `DateTime` and `DateTime64` use their underlying integer values. External producers must use the same unit; for example, `DateTime64(3)` uses epoch milliseconds.
+An unsigned `UInt8`, `UInt16` or `UInt32` value is hashed as the same number as a 64-bit integer, as Java and Spark hash a number that they hold as a `long`.
+The C++ library hashes `uint8_t`, `uint16_t` and `uint32_t` through the signed type of the same width, so for the values from 128, 32768 and 2147483648 respectively (and for `Date` from 32768, `DateTime` from 2147483648, and `IPv4` from 128.0.0.0) its sketch is another one.
+To get the sketch of the C++ library, cast the argument to the signed type of the same width with a cast that wraps: `toInt8(x)`, `toInt16(x)` or `toInt32(x)`; for `Date` use `toInt16(toUInt16(x))`, for `DateTime` use `toInt32(x)`, and for `IPv4` use `toInt32(toUInt32(x))`.
+Do not use `accurateCast`, which rejects these values.
 Unsupported types and multiple arguments are rejected. Use `uniq`, `uniqCombined` or `uniqHLL12` for those inputs.
 
 `NULL` values and empty strings are ignored, as in the Java, Python and C++ implementations and in Spark; unlike `uniq`, an empty string is not counted as a value.
