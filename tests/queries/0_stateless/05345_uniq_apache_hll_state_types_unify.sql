@@ -1,4 +1,4 @@
--- Tags: no-fasttest
+-- Tags: no-fasttest, no-cpu-s390x
 -- ^ DataSketches is not built in fast-test builds.
 
 -- The parameters of `uniqApacheHLL` (`lg_k` and the storage type) do not change what a state means: every sketch carries

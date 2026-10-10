@@ -1,4 +1,4 @@
--- Tags: no-fasttest
+-- Tags: no-fasttest, no-cpu-s390x
 -- ^ DataSketches is not built in fast-test builds.
 
 -- The HIP estimate and the bytes of a `uniqApacheHLL` sketch depend on the order of the updates and of the merges, so the planner must keep an `ORDER BY` below it,

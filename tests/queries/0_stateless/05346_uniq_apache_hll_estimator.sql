@@ -1,4 +1,4 @@
--- Tags: no-fasttest
+-- Tags: no-fasttest, no-cpu-s390x
 -- ^ DataSketches is not built in fast-test builds.
 
 -- The union of sketches that are all small replays their values into the union, and the HIP estimate of such a union depends

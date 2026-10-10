@@ -1,4 +1,4 @@
--- Tags: no-fasttest
+-- Tags: no-fasttest, no-cpu-s390x
 -- ^ DataSketches is not built in fast-test builds.
 
 -- A sketch that another system wrote without a length (for example, Spark `hll_sketch_agg` into Parquet) is read as a state with

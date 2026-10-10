@@ -6,6 +6,15 @@
 #include <AggregateFunctions/AggregateFunctionFactory.h>
 #include <AggregateFunctions/Combinators/AggregateFunctionCombinatorFactory.h>
 
+/// Apache DataSketches hashes values and serializes sketches in the byte order of the host, so the sketches of `uniqApacheHLL` would not
+/// be the ones that other implementations produce and read on a big-endian platform. It is registered only on little-endian
+/// platforms, as if DataSketches were not built.
+#if USE_DATASKETCHES && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#    define USE_UNIQ_APACHE_HLL 1
+#else
+#    define USE_UNIQ_APACHE_HLL 0
+#endif
+
 
 namespace DB
 {
@@ -67,7 +76,7 @@ void registerAggregateFunctionSumMap(AggregateFunctionFactory &);
 void registerAggregateFunctionsUniq(AggregateFunctionFactory &);
 void registerAggregateFunctionUniqCombined(AggregateFunctionFactory &);
 void registerAggregateFunctionUniqUpTo(AggregateFunctionFactory &);
-#if USE_DATASKETCHES
+#if USE_UNIQ_APACHE_HLL
 void registerAggregateFunctionUniqApacheHLL(AggregateFunctionFactory &);
 #endif
 void registerAggregateFunctionTopK(AggregateFunctionFactory &);
@@ -186,7 +195,7 @@ void registerAggregateFunctions()
         registerAggregateFunctionsUniq(factory);
         registerAggregateFunctionUniqCombined(factory);
         registerAggregateFunctionUniqUpTo(factory);
-#if USE_DATASKETCHES
+#if USE_UNIQ_APACHE_HLL
         registerAggregateFunctionUniqApacheHLL(factory);
 #endif
         registerAggregateFunctionTopK(factory);

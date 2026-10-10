@@ -1,4 +1,4 @@
--- Tags: no-fasttest
+-- Tags: no-fasttest, no-cpu-s390x
 -- ^ DataSketches is not built in fast-test builds.
 
 -- A sketch that is read as a state of another type, for example one with a lower `lg_k`, is kept as it was written.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tags: no-fasttest
+# Tags: no-fasttest, no-cpu-s390x
 # no-fasttest -- compiled w/o datasketches
 
 # A sketch that another system wrote without a length in front of it is not a state of `uniqApacheHLL`: the state reader takes
