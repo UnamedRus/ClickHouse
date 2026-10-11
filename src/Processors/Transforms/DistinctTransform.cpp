@@ -198,13 +198,21 @@ void DistinctTransform::buildCombinedFilter(
     IColumnFilter & filter,
     const size_t rows,
     SetVariants & variants,
-    size_t & passed_bf) const
+    size_t & passed_bf,
+    const IColumn::Filter * mask) const
 {
     typename Method::State state(columns, key_sizes, nullptr);
     typename std::remove_reference_t<decltype(method.data)>::LookupResult it;
 
     for (size_t i = 0; i < rows; ++i)
     {
+        if (mask && !(*mask)[i])
+        {
+            /// Already known duplicate row (by LC index), skip hashing it.
+            filter[i] = 0;
+            continue;
+        }
+
         auto key_holder = state.getKeyHolder(i, variants.string_pool);
         auto hash = method.data.hash(keyHolderGetKey(key_holder));
 
@@ -238,12 +246,20 @@ void DistinctTransform::checkSetFilter(
     IColumnFilter & filter,
     const size_t rows,
     SetVariants & variants,
-    size_t & passed_bf) const
+    size_t & passed_bf,
+    const IColumn::Filter * mask) const
 {
     typename Method::State state(columns, key_sizes, nullptr);
 
     for (size_t i = 0; i < rows; ++i)
     {
+        if (mask && !(*mask)[i])
+        {
+            /// Already known duplicate row (by LC index), skip the lookup.
+            filter[i] = 0;
+            continue;
+        }
+
         auto find_result = state.findKey(method.data, i, variants.string_pool);
         /// Emit the record if there is no such key in the current set yet.
         /// Skip it otherwise.
@@ -259,7 +275,8 @@ void DistinctTransform::buildSetParallelFilter(
     IColumnFilter & filter,
     const size_t rows,
     SetVariants & variants,
-    ThreadPool & thread_pool) const
+    ThreadPool & thread_pool,
+    const IColumn::Filter * mask) const
 {
     typename Method::State state(columns, key_sizes, nullptr);
     using KeyHolder = decltype(state.getKeyHolder(std::declval<size_t>(), std::declval<Arena &>()));
@@ -278,7 +295,7 @@ void DistinctTransform::buildSetParallelFilter(
     {
         auto next_row = std::make_shared<std::atomic<size_t>>(0);
 
-        auto thread_func = [next_row, rows, &variants, &state, &coarse_bucket_ids, &bucket_sizes, num_coarse_buckets, &hashes, &keys, &method]()
+        auto thread_func = [next_row, rows, mask, &variants, &state, &coarse_bucket_ids, &bucket_sizes, num_coarse_buckets, &hashes, &keys, &method, &filter]()
         {
             while (true)
             {
@@ -289,6 +306,14 @@ void DistinctTransform::buildSetParallelFilter(
                 const size_t end = std::min(start + block, rows);
                 for (size_t i = start; i < end; ++i)
                 {
+                    if (mask && !(*mask)[i])
+                    {
+                        /// Already known duplicate row (by LC index): it is not hashed and not
+                        /// assigned to any bucket.
+                        filter[i] = 0;
+                        continue;
+                    }
+
                     auto key_holder = state.getKeyHolder(i, variants.string_pool);
                     auto hash = method.data.hash(keyHolderGetKey(key_holder));
                     auto fine_bucket = method.data.getBucketFromHash(hash); /// 0..255
@@ -315,6 +340,8 @@ void DistinctTransform::buildSetParallelFilter(
     std::vector<size_t> write_positions = bucket_offsets;
     for (size_t i = 0; i < rows; ++i)
     {
+        if (mask && !(*mask)[i])
+            continue;
         size_t b = coarse_bucket_ids[i];
         all_indices[write_positions[b]++] = i;
     }
@@ -530,16 +557,16 @@ void DistinctTransform::transformWithOwnSet(Chunk & chunk)
             if constexpr (SetVariants::Type::NAME == SetVariants::Type::hashed_two_level) \
             { \
                 if (old_set_size > PARALLEL_DISTINCT_THRESHOLD && pool && num_rows > 10000) \
-                    buildSetParallelFilter(set, column_ptrs, filter, num_rows, *data, *pool); \
+                    buildSetParallelFilter(set, column_ptrs, filter, num_rows, *data, *pool, lc_mask_ptr); \
                 else \
                     build(); \
             } \
             else if (!is_pre_distinct) \
                 build(); \
             else if (check_only) \
-                checkSetFilter(set, column_ptrs, filter, num_rows, *data, total_passed_check_only); \
+                checkSetFilter(set, column_ptrs, filter, num_rows, *data, total_passed_check_only, lc_mask_ptr); \
             else if (use_bf) \
-                buildCombinedFilter(set, column_ptrs, filter, num_rows, *data, total_passed_bf); \
+                buildCombinedFilter(set, column_ptrs, filter, num_rows, *data, total_passed_bf, lc_mask_ptr); \
             else \
                 build(); \
             \

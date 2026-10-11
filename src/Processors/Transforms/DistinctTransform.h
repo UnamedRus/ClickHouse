@@ -149,7 +149,8 @@ private:
         IColumnFilter & filter,
         size_t rows,
         SetVariants & variants,
-        size_t & passed_bf) const;
+        size_t & passed_bf,
+        const IColumn::Filter * mask) const;
 
     template <typename Method>
     void checkSetFilter(
@@ -158,7 +159,8 @@ private:
         IColumnFilter & filter,
         size_t rows,
         SetVariants & variants,
-        size_t & passed_bf) const;
+        size_t & passed_bf,
+        const IColumn::Filter * mask) const;
 
     template <typename Method>
     void buildSetParallelFilter(
@@ -167,7 +169,8 @@ private:
         IColumnFilter & filter,
         size_t rows,
         SetVariants & variants,
-        ThreadPool & thread_pool) const;
+        ThreadPool & thread_pool,
+        const IColumn::Filter * mask) const;
 
     /// Disables bloom filter if it is likely to have bad selectivity
     void checkBloomFilterWorthiness();
