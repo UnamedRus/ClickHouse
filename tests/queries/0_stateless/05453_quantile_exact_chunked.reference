@@ -1,0 +1,79 @@
+f64	1
+f32	1
+i64	1
+u64	1
+i32	1
+u8	1
+i16	1
+dt	1
+d	1
+d64	1
+d32	1
+d128	1
+dt64	1
+i128	1
+i256	1
+u256	1
+f64 n < 8191	1
+i32 n < 8191	1
+i256 n < 8191	1
+f64 n < 8192	1
+i32 n < 8192	1
+i256 n < 8192	1
+f64 n < 8193	1
+i32 n < 8193	1
+i256 n < 8193	1
+f64 n < 32767	1
+i32 n < 32767	1
+i256 n < 32767	1
+f64 n < 32768	1
+i32 n < 32768	1
+i256 n < 32768	1
+f64 n < 32769	1
+i32 n < 32769	1
+i256 n < 32769	1
+f64 n < 65537	1
+i32 n < 65537	1
+i256 n < 65537	1
+f64 interpolated	1
+f32 interpolated	1
+i64 interpolated	1
+i32 interpolated	1
+u8 interpolated	1
+i16 interpolated	1
+f64 n < 32769 interpolated	1
+f64 group by n % 10000	10000	0
+f64 group by n % 3	3	0
+i64 group by n % 10000	10000	0
+i64 group by n % 3	3	0
+d64 group by n % 10000	10000	0
+d64 group by n % 3	3	0
+i256 group by n % 10000	10000	0
+i256 group by n % 3	3	0
+remote f64	1
+remote i256	1
+remote i64 interpolated	1
+f64 group by n % 50000 two-level	50000	0
+state merge	1
+state merge of chunked and small	1
+state format	1	1600006
+state format small	03000102
+old state	1
+old large state	1
+state of merged	1
+running accumulate	1
+window f64	1
+window i256	1
+arrayReduce	1
+ForEach	1
+Resample	1
+special floats	1
+special floats only	1
+zeros	1
+nans interpolated	1
+all equal	1
+three values	1
+all nans	nan	[0,0]	nan
+large f64	1
+large i32	1
+large f64 interpolated	1
