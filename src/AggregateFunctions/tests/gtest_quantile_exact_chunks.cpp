@@ -433,10 +433,15 @@ TEST(QuantileExactChunks, RadixKeyOrder)
     }
 }
 
-/// High-cardinality GROUP BY relies on small states.
+/// High-cardinality GROUP BY relies on small states: the array with the inline memory occupies the same 64 bytes as it always did,
+/// so the states with the same small number of values do not allocate, and the pointer to the chunks adds 8 bytes.
 TEST(QuantileExact, StateSize)
 {
-    ASSERT_EQ(sizeof(QuantileExact<UInt8>), 64);
-    ASSERT_EQ(sizeof(QuantileExact<Int32>), 64);
-    ASSERT_EQ(sizeof(QuantileExact<Float64>), 64);
+    ASSERT_EQ(sizeof(QuantileExactDetail::QuantileExactChunks<UInt8>::Array), 64);
+    ASSERT_EQ(sizeof(QuantileExactDetail::QuantileExactChunks<Int32>::Array), 64);
+    ASSERT_EQ(sizeof(QuantileExactDetail::QuantileExactChunks<Float64>::Array), 64);
+
+    ASSERT_EQ(sizeof(QuantileExact<UInt8>), 72);
+    ASSERT_EQ(sizeof(QuantileExact<Int32>), 72);
+    ASSERT_EQ(sizeof(QuantileExact<Float64>), 72);
 }

@@ -5,8 +5,10 @@
 #include <IO/WriteBuffer.h>
 #include <Common/NaNUtils.h>
 #include <Common/PODArray.h>
+#include <Common/RadixSort.h>
 #include <Common/VectorWithMemoryTracking.h>
 #include <base/Decimal_fwd.h>
+#include <base/defines.h>
 #include <base/extended_types.h>
 #include <base/sort.h>
 #include <base/types.h>
@@ -117,20 +119,16 @@ struct RadixKey<Value>
     static_assert(sizeof(Key) == sizeof(Value));
 
     static constexpr size_t bits = sizeof(Key) * 8;
-    static constexpr Key sign_bit = static_cast<Key>(Key(1) << (bits - 1));
 
+    /// The transformations are the same as in `RadixSort`.
     static Key toKey(const Value & x)
     {
         if constexpr (std::is_floating_point_v<Value>)
-        {
-            /// Negative values are reversed, positive values go after them.
-            Key u = std::bit_cast<Key>(x);
-            return (u & sign_bit) ? static_cast<Key>(~u) : static_cast<Key>(u | sign_bit);
-        }
+            return RadixSortFloatTransform<Key>::forward(std::bit_cast<Key>(x));
         else if constexpr (is_decimal<Value>)
-            return static_cast<Key>(std::bit_cast<Key>(x.value) ^ sign_bit);
+            return RadixSortSignedTransform<Key>::forward(std::bit_cast<Key>(x.value));
         else if constexpr (static_cast<Value>(-1) < static_cast<Value>(0))
-            return static_cast<Key>(std::bit_cast<Key>(x) ^ sign_bit);
+            return RadixSortSignedTransform<Key>::forward(std::bit_cast<Key>(x));
         else
             return std::bit_cast<Key>(x);
     }
@@ -138,11 +136,11 @@ struct RadixKey<Value>
     static Value fromKey(Key key)
     {
         if constexpr (std::is_floating_point_v<Value>)
-            return std::bit_cast<Value>((key & sign_bit) ? static_cast<Key>(key ^ sign_bit) : static_cast<Key>(~key));
+            return std::bit_cast<Value>(RadixSortFloatTransform<Key>::backward(key));
         else if constexpr (is_decimal<Value>)
-            return Value(std::bit_cast<typename Value::NativeType>(static_cast<Key>(key ^ sign_bit)));
+            return Value(std::bit_cast<typename Value::NativeType>(RadixSortSignedTransform<Key>::backward(key)));
         else if constexpr (static_cast<Value>(-1) < static_cast<Value>(0))
-            return std::bit_cast<Value>(static_cast<Key>(key ^ sign_bit));
+            return std::bit_cast<Value>(RadixSortSignedTransform<Key>::backward(key));
         else
             return std::bit_cast<Value>(key);
     }
@@ -152,8 +150,8 @@ struct RadixKey<Value>
 /** Storage of the values for `quantileExact` functions.
   *
   * Small number of values is kept in one array (`tail`) with inline memory for a few values, as it was always done.
-  * When the array reaches `chunk_size` values, its memory becomes an immutable chunk (without copying),
-  * and the next values go to the new array. So, large states consist of fixed-size chunks and the tail.
+  * When the array reaches `chunk_size` values, its memory (exactly `chunk_bytes`, see `growTail`) becomes an immutable chunk
+  * (without copying), and the next values go to the new array. So, large states consist of fixed-size chunks and the tail.
   *
   * It avoids reallocations of large arrays, which copy all the data and require 2x memory at the moment of growth,
   * and allows merging without copying: the full chunks of the merged state (rhs) are shared,
@@ -179,8 +177,9 @@ public:
     static constexpr size_t chunk_size = std::max<size_t>(1, chunk_bytes / sizeof(Value));
     static constexpr size_t max_bucket_size = std::max<size_t>(1, max_bucket_bytes / sizeof(Value));
 
-    /// The memory will be allocated to several elements at once, so that the state occupies 64 bytes.
-    static constexpr size_t bytes_in_arena = 64 - sizeof(PODArray<Value>) - sizeof(void *);
+    /// The inline memory of the array is the same as it was before chunks were introduced, so the states with the same
+    /// number of values as before do not allocate. The pointer to the chunks makes the state 8 bytes larger.
+    static constexpr size_t bytes_in_arena = 64 - sizeof(PODArray<Value>);
     using Array = PODArrayWithStackMemory<Value, bytes_in_arena>;
     using ChunkPtr = std::shared_ptr<const Array>;
     using Chunks = VectorWithMemoryTracking<ChunkPtr>;
@@ -189,6 +188,8 @@ public:
 
     void push(const Value & x)
     {
+        if (unlikely(tail.size() == tail.capacity()))
+            growTail(tail.size() + 1);
         tail.push_back(x);
         if (unlikely(tail.size() == chunk_size))
             flushTail();
@@ -199,6 +200,8 @@ public:
         while (count)
         {
             size_t to_copy = std::min(count, chunk_size - tail.size());
+            if (tail.size() + to_copy > tail.capacity())
+                growTail(tail.size() + to_copy);
             tail.insert(from, from + to_copy);
             if (tail.size() == chunk_size)
                 flushTail();
@@ -210,6 +213,7 @@ public:
     /// Shares the full chunks of `rhs` and copies the values from its tail.
     void merge(const QuantileExactChunks & rhs)
     {
+        chassert(this != &rhs);
         if (rhs.chunks && !rhs.chunks->empty())
         {
             if (!chunks)
@@ -250,6 +254,8 @@ public:
         while (count)
         {
             size_t to_read = std::min(count, chunk_size);
+            if (tail.capacity() < to_read)
+                tail.reserve_exact(to_read);
             tail.resize(to_read);
             buf.readStrict(reinterpret_cast<char *>(tail.data()), to_read * sizeof(Value));
             if (tail.size() == chunk_size)
@@ -258,7 +264,7 @@ public:
         }
     }
 
-    /// Writes into `result[i]` the value at position `ranks[i]` in the sorted data. Every rank must be less than `size()`.
+    /// Writes into `result[i]` the value at position `ranks[i]` in the sorted data. Every rank must be less than `size`.
     /// Can reorder the values in the tail, but does not modify the full chunks.
     void select(const size_t * ranks, size_t num_ranks, Value * result)
     {
@@ -305,6 +311,15 @@ private:
     /// Allocated on demand, so that small states are small.
     std::unique_ptr<Chunks> chunks;
 
+    /// Makes room for at least `needed` values in the tail. The capacity grows geometrically, but never exceeds `chunk_size`,
+    /// so the memory of the full tail is exactly `chunk_bytes` regardless of the size of the inline memory.
+    /// The new tail starts from the inline memory again and does not allocate until it needs more.
+    void growTail(size_t needed)
+    {
+        chassert(needed <= chunk_size);
+        tail.reserve_exact(std::min(chunk_size, std::max(needed, tail.capacity() * 2)));
+    }
+
     /// Moves the memory of the full tail into a new chunk.
     void flushTail()
     {
@@ -316,7 +331,6 @@ private:
         /// The full tail uses the heap memory of `chunk_bytes`, which is taken by the chunk without copying.
         chunk->swap(tail);
         chunks->push_back(std::move(chunk));
-        tail.reserve(chunk_size);
     }
 
     using Key = typename RadixKey<Value>::Key;
@@ -537,7 +551,7 @@ struct QuantileExactBase
 protected:
     size_t size() const { return values.size(); }
 
-    /// Returns the value at position `rank` in the sorted data. The rank must be less than `size()`.
+    /// Returns the value at position `rank` in the sorted data. The rank must be less than `size`.
     Value select(size_t rank)
     {
         Value result{};
@@ -545,7 +559,7 @@ protected:
         return result;
     }
 
-    /// Writes into `result[i]` the value at position `ranks[i]` in the sorted data. Every rank must be less than `size()`.
+    /// Writes into `result[i]` the value at position `ranks[i]` in the sorted data. Every rank must be less than `size`.
     void select(const size_t * ranks, size_t num_ranks, Value * result) { values.select(ranks, num_ranks, result); }
 };
 

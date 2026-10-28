@@ -343,66 +343,42 @@ FROM
 
 SELECT 'i128', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i128) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i128) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i128) AS qs_high,
         quantileExact(0.3)(i128) AS q,
         medianExact(i128) AS med,
-        medianExactLow(i128) AS low,
-        medianExactHigh(i128) AS high,
         arraySort(groupArray(i128)) AS s
     FROM t_quantile_exact_chunked
 );
 
 SELECT 'i256', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
 );
 
 SELECT 'u256', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(u256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(u256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(u256) AS qs_high,
         quantileExact(0.3)(u256) AS q,
         medianExact(u256) AS med,
-        medianExactLow(u256) AS low,
-        medianExactHigh(u256) AS high,
         arraySort(groupArray(u256)) AS s
     FROM t_quantile_exact_chunked
 );
@@ -458,22 +434,14 @@ FROM
 
 SELECT 'i256 n < 8191', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 8191
@@ -527,22 +495,14 @@ FROM
 
 SELECT 'i256 n < 8192', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 8192
@@ -596,22 +556,14 @@ FROM
 
 SELECT 'i256 n < 8193', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 8193
@@ -665,22 +617,14 @@ FROM
 
 SELECT 'i256 n < 32767', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 32767
@@ -734,22 +678,14 @@ FROM
 
 SELECT 'i256 n < 32768', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 32768
@@ -803,22 +739,14 @@ FROM
 
 SELECT 'i256 n < 32769', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 32769
@@ -872,22 +800,14 @@ FROM
 
 SELECT 'i256 n < 65537', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     WHERE n < 65537
@@ -1194,22 +1114,14 @@ FROM
 
 SELECT 'i256 group by n % 10000', count(), countIf(NOT (length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
-    AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]))
+    AND med = s[intDiv(length(s), 2) + 1]))
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     GROUP BY n % 10000
@@ -1217,22 +1129,14 @@ FROM
 
 SELECT 'i256 group by n % 3', count(), countIf(NOT (length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
-    AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]))
+    AND med = s[intDiv(length(s), 2) + 1]))
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM t_quantile_exact_chunked
     GROUP BY n % 3
@@ -1265,22 +1169,14 @@ FROM
 
 SELECT 'remote i256', length(s) > 0
     AND arrayAll((x, l) -> x = s[toUInt64(if(l < 1, floor(l * length(s)), length(s) - 1)) + 1], qs, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_low, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
-    AND arrayAll((x, l) -> x = s[toUInt64(if(l = 0.5, intDiv(length(s), 2), if(l < 1, floor(l * length(s)), length(s) - 1))) + 1], qs_high, [0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1])
     AND q = s[toUInt64(floor(0.3 * length(s))) + 1]
     AND med = s[intDiv(length(s), 2) + 1]
-    AND low = s[if(length(s) % 2 = 1, intDiv(length(s), 2), intDiv(length(s), 2) - 1) + 1]
-    AND high = s[intDiv(length(s), 2) + 1]
 FROM
 (
     SELECT
         quantilesExact(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs,
-        quantilesExactLow(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_low,
-        quantilesExactHigh(0, 0.001, 0.1, 0.25, 0.3, 0.5, 0.75, 0.9, 0.999, 1)(i256) AS qs_high,
         quantileExact(0.3)(i256) AS q,
         medianExact(i256) AS med,
-        medianExactLow(i256) AS low,
-        medianExactHigh(i256) AS high,
         arraySort(groupArray(i256)) AS s
     FROM remote('127.0.0.{1,2}', currentDatabase(), t_quantile_exact_chunked)
 );
@@ -1391,14 +1287,14 @@ FROM
 WHERE n IN (0, 32766, 32767, 32768, 33999);
 
 SELECT 'window i256', arrayMap(x -> x.2, arraySort(groupArray((n, m)))) = [
-        (SELECT quantileExactHigh(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 0),
-        (SELECT quantileExactHigh(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8190),
-        (SELECT quantileExactHigh(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8191),
-        (SELECT quantileExactHigh(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8192),
-        (SELECT quantileExactHigh(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8999)]
+        (SELECT quantileExact(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 0),
+        (SELECT quantileExact(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8190),
+        (SELECT quantileExact(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8191),
+        (SELECT quantileExact(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8192),
+        (SELECT quantileExact(0.5)(i256) FROM t_quantile_exact_chunked WHERE n <= 8999)]
 FROM
 (
-    SELECT n, quantileExactHigh(0.5)(i256) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS m
+    SELECT n, quantileExact(0.5)(i256) OVER (ORDER BY n ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS m
     FROM t_quantile_exact_chunked
     WHERE n < 9000
 )
